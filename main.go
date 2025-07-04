@@ -28,7 +28,7 @@ func main() {
     r := gin.Default()
 
     // Load templates and static files
-    r.LoadHTMLGlob("templates/**/*.html")
+   
     r.Static("/static", "./static")
 
     // CORS middleware (fixes your error)
@@ -116,8 +116,7 @@ func setupRoutes(r *gin.Engine) {
     })
 
     // Public routes
-    r.GET("/", handlers.Home)
-    r.GET("/login", handlers.LoginPage)
+
     r.POST("/login", handlers.Login)
     r.GET("/logout", handlers.Logout)
     r.GET("/register", handlers.RegisterPage)

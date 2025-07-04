@@ -15,12 +15,6 @@ import (
     "jevi-chat/models"
 )
 
-func Home(c *gin.Context) {
-    c.HTML(http.StatusOK, "auth/login.html", gin.H{
-        "title": "Welcome to Jevi Chat",
-    })
-}
-
 func RegisterPage(c *gin.Context) {
     c.HTML(http.StatusOK, "auth/register.html", gin.H{
         "title": "Register - Jevi Chat",
@@ -92,11 +86,6 @@ func Register(c *gin.Context) {
     c.Redirect(http.StatusFound, "/user/dashboard")
 }
 
-func LoginPage(c *gin.Context) {
-    c.HTML(http.StatusOK, "auth/login.html", gin.H{
-        "title": "Login - Jevi Chat",
-    })
-}
 
 func Login(c *gin.Context) {
     var loginData struct {
