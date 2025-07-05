@@ -1,5 +1,3 @@
-package handlers
-
 import (
     "context"
     "fmt"
@@ -54,11 +52,8 @@ func SendMessage(c *gin.Context) {
         return
     }
 
-    // Keep project-level usage limit check
-    if !project.IsWithinLimit() {
-        c.JSON(http.StatusForbidden, gin.H{"error": "Project Gemini usage limit reached"})
-        return
-    }
+    // REMOVED: User-specific Gemini usage limit check
+    // Keep only basic project validation
 
     // Generate AI response
     userIP := c.ClientIP()
@@ -81,7 +76,7 @@ func SendMessage(c *gin.Context) {
     }
     config.DB.Collection("chat_messages").InsertOne(context.Background(), chatMsg)
 
-    // Update Gemini usage count
+    // Update Gemini usage count (for analytics only, no limits)
     usageIncrement := inputTokens + outputTokens
     update := bson.M{
         "$inc": bson.M{
@@ -167,32 +162,8 @@ func IframeSendMessage(c *gin.Context) {
         return
     }
 
-    // Keep project-level usage limits
-    if project.GeminiUsageToday >= project.GeminiDailyLimit {
-        c.JSON(http.StatusTooManyRequests, gin.H{
-            "error":  "Daily AI usage limit reached for this project",
-            "status": "daily_limit_exceeded",
-            "usage_info": gin.H{
-                "daily_usage": project.GeminiUsageToday,
-                "daily_limit": project.GeminiDailyLimit,
-                "resets_at":   getNextDailyReset(),
-            },
-        })
-        return
-    }
-
-    if project.GeminiUsageMonth >= project.GeminiMonthlyLimit {
-        c.JSON(http.StatusTooManyRequests, gin.H{
-            "error":  "Monthly AI usage limit reached for this project",
-            "status": "monthly_limit_exceeded",
-            "usage_info": gin.H{
-                "monthly_usage": project.GeminiUsageMonth,
-                "monthly_limit": project.GeminiMonthlyLimit,
-                "resets_at":     getNextMonthlyReset(),
-            },
-        })
-        return
-    }
+    // REMOVED: All Gemini usage limit checks for users
+    // Users can now use unlimited Gemini requests
 
     // Get user info if token provided
     var user models.ChatUser
@@ -239,7 +210,7 @@ func IframeSendMessage(c *gin.Context) {
     // Save message to database with user info
     saveMessage(objID, messageData.Message, response, messageData.SessionID, c.ClientIP(), user)
 
-    // Prepare response with project usage information
+    // Prepare response with unlimited usage information
     responseData := gin.H{
         "response":   response,
         "project_id": projectID,
@@ -247,13 +218,12 @@ func IframeSendMessage(c *gin.Context) {
         "timestamp":  time.Now().Format(time.RFC3339),
         "user_name":  user.Name,
         "usage_info": gin.H{
-            "daily_usage":     project.GeminiUsageToday + 1,
-            "daily_limit":     project.GeminiDailyLimit,
-            "daily_remaining": max(0, project.GeminiDailyLimit-project.GeminiUsageToday-1),
-            "monthly_usage":   project.GeminiUsageMonth + 1,
-            "monthly_limit":   project.GeminiMonthlyLimit,
-            "response_time":   responseTime,
-            "tokens_used":     inputTokens + outputTokens,
+            "unlimited_access": true,
+            "daily_usage":      project.GeminiUsageToday + 1,
+            "monthly_usage":    project.GeminiUsageMonth + 1,
+            "response_time":    responseTime,
+            "tokens_used":      inputTokens + outputTokens,
+            "message":          "Unlimited AI usage enabled",
         },
     }
 
@@ -319,11 +289,7 @@ func HandleChatMessage(c *gin.Context) {
         return
     }
 
-    // Keep project usage limits
-    if !project.IsWithinLimit() {
-        c.JSON(http.StatusTooManyRequests, gin.H{"success": false, "message": "Project usage limit exceeded"})
-        return
-    }
+    // REMOVED: Project usage limits - unlimited access for users
 
     // Generate response using project's PDF content
     response, err := generateResponseWithPDFContent(messageData.Message, project)
@@ -349,13 +315,14 @@ func HandleChatMessage(c *gin.Context) {
         chatMessage.ID = result.InsertedID.(primitive.ObjectID)
     }
 
-    // Update project usage
+    // Update project usage (for analytics only)
     go updateProjectUsage(objID)
 
     c.JSON(http.StatusOK, gin.H{
         "success":    true,
         "response":   response,
         "message_id": chatMessage.ID.Hex(),
+        "unlimited":  true,
     })
 }
 
@@ -601,13 +568,31 @@ Answer:`, project.Name, userContext, project.PDFContent, userMessage)
         inputTokens := estimateTokens(prompt)
         outputTokens := estimateTokens(response)
 
-        // Update usage with tokens
+        // Update usage with tokens (for analytics only)
         go updateProjectUsageWithTokens(project.ID, inputTokens, outputTokens, modelName)
 
         return response, inputTokens, outputTokens, nil
     }
 
     return "", 0, 0, fmt.Errorf("no response generated")
+}
+
+// ===== ADDITIONAL UTILITY FUNCTIONS =====
+
+// getWelcomeMessage - Get welcome message for first-time users
+func getWelcomeMessage(customMessage string) string {
+    if customMessage != "" {
+        return customMessage
+    }
+    return "Hello! I'm here to help you with any questions you have. How can I assist you today?"
+}
+
+// getGeminiModel - Get Gemini model name with fallback
+func getGeminiModel(modelName string) string {
+    if modelName == "" {
+        return "gemini-1.5-flash" // Default model
+    }
+    return modelName
 }
 
 // ===== CHAT HISTORY AND ANALYTICS =====
@@ -779,11 +764,11 @@ func DebugProjectPDFContent(c *gin.Context) {
         "pdf_content_preview": project.PDFContent[:min(500, len(project.PDFContent))],
         "gemini_enabled":      project.GeminiEnabled,
         "gemini_model":        project.GeminiModel,
+        "unlimited_access":    true,
         "usage_info": gin.H{
             "daily_usage":   project.GeminiUsageToday,
-            "daily_limit":   project.GeminiDailyLimit,
             "monthly_usage": project.GeminiUsageMonth,
-            "monthly_limit": project.GeminiMonthlyLimit,
+            "note":          "Usage tracking for analytics only - no limits enforced",
         },
     })
 }
@@ -804,9 +789,6 @@ func isFirstMessage(projectID primitive.ObjectID, sessionID string) bool {
         })
     return count == 0
 }
-
-
-
 
 // saveMessage - Save chat message with user context
 func saveMessage(projectID primitive.ObjectID, message, response, sessionID, userIP string, user models.ChatUser) {
@@ -834,7 +816,7 @@ func saveMessage(projectID primitive.ObjectID, message, response, sessionID, use
     }
 }
 
-// updateProjectUsage - Update usage counters
+// updateProjectUsage - Update usage counters (for analytics only)
 func updateProjectUsage(projectID primitive.ObjectID) {
     collection := config.DB.Collection("projects")
 
@@ -857,7 +839,7 @@ func updateProjectUsage(projectID primitive.ObjectID) {
     }
 }
 
-// updateProjectUsageWithTokens - Update usage with detailed token tracking
+// updateProjectUsageWithTokens - Update usage with detailed token tracking (for analytics only)
 func updateProjectUsageWithTokens(projectID primitive.ObjectID, inputTokens, outputTokens int, model string) {
     collection := config.DB.Collection("projects")
 
