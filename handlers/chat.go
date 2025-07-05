@@ -8,6 +8,8 @@ import (
     "strings"
     "time"
     "math"
+
+    "sync"
     "github.com/gin-gonic/gin"
     "go.mongodb.org/mongo-driver/bson"
     "go.mongodb.org/mongo-driver/bson/primitive"
@@ -18,11 +20,142 @@ import (
     "github.com/google/generative-ai-go/genai"
 )
 
+// ===== RATE LIMITING IMPLEMENTATION =====
+
+type RateLimiter struct {
+    visitors map[string]*Visitor
+    mu       sync.RWMutex
+    rate     time.Duration
+    burst    int
+}
+
+type Visitor struct {
+    lastSeen time.Time
+    count    int
+    window   time.Time
+}
+
+var (
+    // Rate limiters for different endpoints
+    chatRateLimiter     *RateLimiter
+    authRateLimiter     *RateLimiter
+    generalRateLimiter  *RateLimiter
+)
+
+// NewRateLimiter creates a new rate limiter
+func NewRateLimiter(rate time.Duration, burst int) *RateLimiter {
+    rl := &RateLimiter{
+        visitors: make(map[string]*Visitor),
+        rate:     rate,
+        burst:    burst,
+    }
+    
+    // Clean up old visitors every 5 minutes
+    go rl.cleanupVisitors()
+    
+    return rl
+}
+
+// Allow checks if the request is allowed
+func (rl *RateLimiter) Allow(ip string) bool {
+    rl.mu.Lock()
+    defer rl.mu.Unlock()
+    
+    now := time.Now()
+    
+    visitor, exists := rl.visitors[ip]
+    if !exists {
+        visitor = &Visitor{
+            lastSeen: now,
+            count:    1,
+            window:   now.Truncate(rl.rate),
+        }
+        rl.visitors[ip] = visitor
+        return true
+    }
+    
+    // Check if we're in a new time window
+    currentWindow := now.Truncate(rl.rate)
+    if visitor.window.Before(currentWindow) {
+        visitor.count = 1
+        visitor.window = currentWindow
+        visitor.lastSeen = now
+        return true
+    }
+    
+    // Check if under burst limit
+    if visitor.count < rl.burst {
+        visitor.count++
+        visitor.lastSeen = now
+        return true
+    }
+    
+    return false
+}
+
+// GetRemainingRequests returns remaining requests in current window
+func (rl *RateLimiter) GetRemainingRequests(ip string) int {
+    rl.mu.RLock()
+    defer rl.mu.RUnlock()
+    
+    visitor, exists := rl.visitors[ip]
+    if !exists {
+        return rl.burst
+    }
+    
+    now := time.Now()
+    currentWindow := now.Truncate(rl.rate)
+    
+    if visitor.window.Before(currentWindow) {
+        return rl.burst
+    }
+    
+    remaining := rl.burst - visitor.count
+    if remaining < 0 {
+        return 0
+    }
+    return remaining
+}
+
+// cleanupVisitors removes old visitors
+func (rl *RateLimiter) cleanupVisitors() {
+    ticker := time.NewTicker(5 * time.Minute)
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case <-ticker.C:
+            rl.mu.Lock()
+            cutoff := time.Now().Add(-10 * time.Minute)
+            for ip, visitor := range rl.visitors {
+                if visitor.lastSeen.Before(cutoff) {
+                    delete(rl.visitors, ip)
+                }
+            }
+            rl.mu.Unlock()
+        }
+    }
+}
+
+// InitRateLimiters initializes rate limiters
+func InitRateLimiters() {
+    // Chat endpoints: 30 requests per minute
+    chatRateLimiter = NewRateLimiter(time.Minute, 30)
+    
+    // Auth endpoints: 10 requests per minute (more restrictive)
+    authRateLimiter = NewRateLimiter(time.Minute, 10)
+    
+    // General endpoints: 60 requests per minute
+    generalRateLimiter = NewRateLimiter(time.Minute, 60)
+}
+
 // ===== MAIN CHAT HANDLERS =====
 
 // SendMessage - For authenticated users in the main dashboard
 func SendMessage(c *gin.Context) {
     projectID := c.Param("id")
+    clientIP := c.ClientIP()
+    
     var messageData struct {
         Message   string `json:"message"`
         SessionID string `json:"session_id"`
@@ -40,9 +173,23 @@ func SendMessage(c *gin.Context) {
         return
     }
     
-    // Check rate limit
-    if !checkRateLimit(c.ClientIP()) {
-        c.JSON(http.StatusTooManyRequests, gin.H{"error": "Rate limit exceeded. Please wait before sending another message."})
+    // Enhanced rate limiting with proper response
+    if !checkRateLimit(clientIP) {
+        remaining := 0
+        if chatRateLimiter != nil {
+            remaining = chatRateLimiter.GetRemainingRequests(clientIP)
+        }
+        
+        c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+        c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
+        c.Header("Retry-After", "60")
+        
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error":       "Rate limit exceeded",
+            "message":     "Too many requests. Please wait before sending another message.",
+            "retry_after": 60,
+            "remaining":   remaining,
+        })
         return
     }
     
@@ -113,7 +260,7 @@ func SendMessage(c *gin.Context) {
         Response:  response,
         IsUser:    false,
         Timestamp: time.Now(),
-        IPAddress: c.ClientIP(),
+        IPAddress: clientIP,
     }
     
     chatCollection := config.DB.Collection("chat_messages")
@@ -123,6 +270,13 @@ func SendMessage(c *gin.Context) {
         fmt.Printf("Failed to save chat message: %v\n", err)
     } else {
         chatMessage.ID = result.InsertedID.(primitive.ObjectID)
+    }
+    
+    // Add rate limit headers to response
+    if chatRateLimiter != nil {
+        remaining := chatRateLimiter.GetRemainingRequests(clientIP)
+        c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+        c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
     }
     
     c.JSON(http.StatusOK, gin.H{
@@ -142,6 +296,7 @@ func SendMessage(c *gin.Context) {
 func IframeSendMessage(c *gin.Context) {
     projectID := c.Param("projectId")
     startTime := time.Now() // Track response time
+    clientIP := c.ClientIP()
     
     objID, err := primitive.ObjectIDFromHex(projectID)
     if err != nil {
@@ -167,9 +322,24 @@ func IframeSendMessage(c *gin.Context) {
         return
     }
 
-    // Check rate limit
-    if !checkRateLimit(c.ClientIP()) {
-        c.JSON(http.StatusTooManyRequests, gin.H{"error": "Please wait before sending another message"})
+    // Enhanced rate limiting with proper response
+    if !checkRateLimit(clientIP) {
+        remaining := 0
+        if chatRateLimiter != nil {
+            remaining = chatRateLimiter.GetRemainingRequests(clientIP)
+        }
+        
+        c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+        c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
+        c.Header("Retry-After", "60")
+        
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error":       "Rate limit exceeded",
+            "message":     "Please wait before sending another message",
+            "retry_after": 60,
+            "remaining":   remaining,
+            "status":      "rate_limited",
+        })
         return
     }
 
@@ -248,7 +418,7 @@ func IframeSendMessage(c *gin.Context) {
         response = project.WelcomeMessage
     } else if project.GeminiAPIKey != "" {
         response, inputTokens, outputTokens, err = generateGeminiResponseWithTracking(
-            project, messageData.Message, c.ClientIP(), user)
+            project, messageData.Message, clientIP, user)
         if err != nil {
             success = false
             errorMsg = err.Error()
@@ -268,7 +438,14 @@ func IframeSendMessage(c *gin.Context) {
     responseTime := time.Since(startTime).Milliseconds()
 
     // Save message to database with user info
-    saveMessage(objID, messageData.Message, response, messageData.SessionID, c.ClientIP(), user)
+    saveMessage(objID, messageData.Message, response, messageData.SessionID, clientIP, user)
+
+    // Add rate limit headers to response
+    if chatRateLimiter != nil {
+        remaining := chatRateLimiter.GetRemainingRequests(clientIP)
+        c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+        c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
+    }
 
     // Enhanced: Prepare response with detailed usage information
     responseData := gin.H{
@@ -681,11 +858,15 @@ func sanitizeInput(input string) string {
     return cleaned
 }
 
-// checkRateLimit - Simple rate limiting (implement with Redis for production)
+// checkRateLimit - Enhanced rate limiting with proper implementation
 func checkRateLimit(userIP string) bool {
-    // For now, return true. In production, implement Redis-based rate limiting
-    // Allow max 10 messages per minute per IP
-    return true
+    // Initialize rate limiters if not already done
+    if chatRateLimiter == nil {
+        InitRateLimiters()
+    }
+    
+    // Use chat rate limiter for message endpoints
+    return chatRateLimiter.Allow(userIP)
 }
 
 // validateUserToken - Validate user authentication token
@@ -792,3 +973,60 @@ func estimateTokens(text string) int {
     // This is an approximation since exact tokenization varies by model
     return len(text) / 4
 }
+
+
+
+// RateLimitMiddleware creates a rate limiting middleware for different endpoint types
+func RateLimitMiddleware(limiterType string) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        clientIP := c.ClientIP()
+        
+        var allowed bool
+        var remaining int
+        
+        // Initialize rate limiters if not already done
+        if chatRateLimiter == nil {
+            InitRateLimiters()
+        }
+        
+        // Choose appropriate rate limiter based on type
+        switch limiterType {
+        case "chat":
+            allowed = chatRateLimiter.Allow(clientIP)
+            remaining = chatRateLimiter.GetRemainingRequests(clientIP)
+        case "auth":
+            allowed = authRateLimiter.Allow(clientIP)
+            remaining = authRateLimiter.GetRemainingRequests(clientIP)
+        case "general":
+            allowed = generalRateLimiter.Allow(clientIP)
+            remaining = generalRateLimiter.GetRemainingRequests(clientIP)
+        default:
+            // Default to general rate limiter
+            allowed = generalRateLimiter.Allow(clientIP)
+            remaining = generalRateLimiter.GetRemainingRequests(clientIP)
+        }
+        
+        // Add rate limit headers to response
+        c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+        c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
+        
+        // Check if request is allowed
+        if !allowed {
+            c.Header("Retry-After", "60")
+            
+            c.JSON(http.StatusTooManyRequests, gin.H{
+                "error":       "Rate limit exceeded",
+                "message":     "Too many requests. Please wait before trying again.",
+                "retry_after": 60,
+                "remaining":   0,
+                "limit_type":  limiterType,
+            })
+            c.Abort()
+            return
+        }
+        
+        // Continue to next middleware/handler
+        c.Next()
+    }
+}
+

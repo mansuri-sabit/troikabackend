@@ -24,6 +24,10 @@ func main() {
 	config.InitMongoDB()
 	config.InitGemini()
 
+	// ✅ NEW: Initialize rate limiters
+	handlers.InitRateLimiters()
+	log.Println("✅ Rate limiters initialized")
+
 	// Set up Gin
 	r := gin.Default()
 	r.LoadHTMLGlob("templates/**/*.html")
@@ -41,7 +45,7 @@ func main() {
 		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With", "X-CSRF-Token", "Cache-Control"},
-		ExposeHeaders:    []string{"Content-Length", "Content-Type"},
+		ExposeHeaders:    []string{"Content-Length", "Content-Type", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}
@@ -56,21 +60,8 @@ func main() {
 		c.Next()
 	})
 
-	// Setup Routes
+	// Setup Routes with rate limiting
 	setupRoutes(r)
-
-	// ✅ FIXED: Embed endpoints with proper route organization
-	embedGroup := r.Group("/embed/:projectId")
-	{
-		embedGroup.GET("", handlers.EmbedChat)                    // Main embed page
-		embedGroup.GET("/auth", handlers.EmbedAuth)               // ✅ NEW: GET auth page
-		embedGroup.POST("/auth", handlers.EmbedAuth)              // ✅ EXISTING: POST auth submission
-		embedGroup.GET("/chat", handlers.IframeChatInterface)     // Chat interface
-		embedGroup.POST("/message", handlers.IframeSendMessage)   // Send message
-	}
-
-	// ✅ NEW: Embed health check
-	r.GET("/embed/health", handlers.EmbedHealth)
 
 	// Chat widget JS and CSS
 	r.GET("/widget.js", func(c *gin.Context) {
@@ -87,23 +78,26 @@ func main() {
 	}
 
 	log.Printf("🚀 Jevi Chat Server running on port %s", port)
+	log.Printf("📊 Rate Limiting: Chat(30/min), Auth(10/min), General(60/min)")
 	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, r))
 }
 
 func setupRoutes(r *gin.Engine) {
-	// Health
+	// Health check (no rate limiting for monitoring)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status":    "healthy",
-			"service":   "jevi-chat",
-			"version":   "1.0.0",
-			"cors":      "enabled",
-			"iframe":    "enabled",
-			"timestamp": time.Now().Format(time.RFC3339),
+			"status":      "healthy",
+			"service":     "jevi-chat",
+			"version":     "1.0.0",
+			"cors":        "enabled",
+			"iframe":      "enabled",
+			"rate_limit":  "enabled",
+			"timestamp":   time.Now().Format(time.RFC3339),
 		})
 	})
 
-	r.GET("/cors-test", func(c *gin.Context) {
+	// CORS test endpoint (light rate limiting)
+	r.GET("/cors-test", handlers.RateLimitMiddleware("general"), func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "CORS is working!",
 			"origin":  c.Request.Header.Get("Origin"),
@@ -112,14 +106,41 @@ func setupRoutes(r *gin.Engine) {
 		})
 	})
 
-	// Public Auth Routes
-	r.POST("/login", handlers.Login)
-	r.GET("/logout", handlers.Logout)
-	r.GET("/register", handlers.RegisterPage)
-	r.POST("/register", handlers.Register)
+	// ✅ UPDATED: Embed endpoints with proper rate limiting
+	embedGroup := r.Group("/embed/:projectId")
+	embedGroup.Use(handlers.RateLimitMiddleware("general")) // 60 req/min for embed pages
+	{
+		embedGroup.GET("", handlers.EmbedChat)                    // Main embed page
+		embedGroup.GET("/chat", handlers.IframeChatInterface)     // Chat interface
+		
+		// Auth endpoints with stricter rate limiting
+		authGroup := embedGroup.Group("/auth")
+		authGroup.Use(handlers.RateLimitMiddleware("auth")) // 10 req/min for auth
+		{
+			authGroup.GET("", handlers.EmbedAuth)   // Show auth page
+			authGroup.POST("", handlers.EmbedAuth)  // Handle auth submission
+		}
+		
+		// Message endpoint with chat rate limiting
+		embedGroup.POST("/message", handlers.RateLimitMiddleware("chat"), handlers.IframeSendMessage) // 30 req/min
+	}
 
-	// API Routes (optional)
+	// ✅ NEW: Embed health check
+	r.GET("/embed/health", handlers.EmbedHealth)
+
+	// ✅ UPDATED: Public Auth Routes with rate limiting
+	authRoutes := r.Group("/")
+	authRoutes.Use(handlers.RateLimitMiddleware("auth")) // 10 req/min for auth
+	{
+		authRoutes.POST("/login", handlers.Login)
+		authRoutes.GET("/logout", handlers.Logout)
+		authRoutes.GET("/register", handlers.RegisterPage)
+		authRoutes.POST("/register", handlers.Register)
+	}
+
+	// ✅ UPDATED: API Routes with rate limiting
 	api := r.Group("/api")
+	api.Use(handlers.RateLimitMiddleware("general")) // 60 req/min for API
 	{
 		api.POST("/login", handlers.Login)
 		api.POST("/register", handlers.Register)
@@ -136,8 +157,9 @@ func setupRoutes(r *gin.Engine) {
 		api.GET("/admin/realtime-stats", handlers.GetRealtimeStats)
 	}
 
-	// Admin Routes (protected)
+	// ✅ UPDATED: Admin Routes with moderate rate limiting
 	admin := r.Group("/admin")
+	admin.Use(handlers.RateLimitMiddleware("general")) // 60 req/min for admin
 	admin.Use(func(c *gin.Context) {
 		if c.Request.Method == "OPTIONS" {
 			c.Next()
@@ -163,8 +185,9 @@ func setupRoutes(r *gin.Engine) {
 		admin.DELETE("/projects/:id/pdf/:fileId", handlers.DeletePDF)
 	}
 
-	// User Routes (protected)
+	// ✅ UPDATED: User Routes with rate limiting
 	user := r.Group("/user")
+	user.Use(handlers.RateLimitMiddleware("general")) // 60 req/min for user dashboard
 	user.Use(func(c *gin.Context) {
 		if c.Request.Method == "OPTIONS" {
 			c.Next()
@@ -176,25 +199,31 @@ func setupRoutes(r *gin.Engine) {
 		user.GET("/dashboard", handlers.UserDashboard)
 		user.GET("/project/:id", handlers.ProjectDashboard)
 		user.GET("/chat/:id", handlers.IframeChatInterface)
-		user.POST("/chat/:id/message", handlers.SendMessage)
+		
+		// Chat message endpoint with stricter rate limiting
+		user.POST("/chat/:id/message", handlers.RateLimitMiddleware("chat"), handlers.SendMessage) // 30 req/min
+		
 		user.POST("/project/:id/upload", handlers.UploadPDF)
 		user.GET("/chat/:id/history", handlers.GetChatHistory)
 	}
 
-	// Chat API for Iframe or Embedded Usage (public)
+	// ✅ UPDATED: Chat API with proper rate limiting
 	chat := r.Group("/chat")
+	chat.Use(handlers.RateLimitMiddleware("chat")) // 30 req/min for chat
 	{
 		chat.POST("/:projectId/message", handlers.IframeSendMessage)
 		chat.GET("/:projectId/history", handlers.GetChatHistory)
+		chat.POST("/:projectId/rate/:messageId", handlers.RateMessage) // Rate message endpoint
 	}
 
-	// 404 and method errors
+	// ✅ ENHANCED: 404 and method errors with rate limiting info
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error":   "Route not found",
 			"message": "The requested endpoint does not exist",
 			"path":    c.Request.URL.Path,
 			"method":  c.Request.Method,
+			"hint":    "Check the API documentation for valid endpoints",
 		})
 	})
 
@@ -204,6 +233,7 @@ func setupRoutes(r *gin.Engine) {
 			"message": "The requested method is not allowed for this endpoint",
 			"path":    c.Request.URL.Path,
 			"method":  c.Request.Method,
+			"hint":    "Check the allowed methods for this endpoint",
 		})
 	})
 }
