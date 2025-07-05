@@ -139,10 +139,167 @@ func SendMessage(c *gin.Context) {
 }
 
 // IframeSendMessage - For embed widget users with enhanced features
+// func IframeSendMessage(c *gin.Context) {
+//     projectID := c.Param("projectId")
+//     startTime := time.Now() // Track response time
+    
+//     objID, err := primitive.ObjectIDFromHex(projectID)
+//     if err != nil {
+//         c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+//         return
+//     }
+
+//     var messageData struct {
+//         Message   string `json:"message"`
+//         SessionID string `json:"session_id"`
+//         UserToken string `json:"user_token"`
+//     }
+
+//     if err := c.ShouldBindJSON(&messageData); err != nil {
+//         c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message data"})
+//         return
+//     }
+
+//     // Sanitize and validate input
+//     messageData.Message = sanitizeInput(messageData.Message)
+//     if messageData.Message == "" {
+//         c.JSON(http.StatusBadRequest, gin.H{"error": "Message cannot be empty"})
+//         return
+//     }
+
+//     // Check rate limit
+//     if !checkRateLimit(c.ClientIP()) {
+//         c.JSON(http.StatusTooManyRequests, gin.H{"error": "Please wait before sending another message"})
+//         return
+//     }
+
+//     // Get project details
+//     collection := config.DB.Collection("projects")
+//     var project models.Project
+//     err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
+//     if err != nil {
+//         c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+//         return
+//     }
+
+//     // Check if project is active
+//     if !project.IsActive {
+//         c.JSON(http.StatusForbidden, gin.H{"error": "This chat is currently unavailable"})
+//         return
+//     }
+
+//     // Enhanced: Check if Gemini is enabled
+//     if !project.GeminiEnabled {
+//         c.JSON(http.StatusForbidden, gin.H{
+//             "error": "AI responses are currently disabled for this project",
+//             "status": "gemini_disabled",
+//         })
+//         return
+//     }
+
+//     // Enhanced: Check daily usage limits
+//     if project.GeminiUsageToday >= project.GeminiDailyLimit {
+//         c.JSON(http.StatusTooManyRequests, gin.H{
+//             "error": "Daily AI usage limit reached for this project",
+//             "status": "daily_limit_exceeded",
+//             "usage_info": gin.H{
+//                 "daily_usage": project.GeminiUsageToday,
+//                 "daily_limit": project.GeminiDailyLimit,
+//                 "resets_at": getNextDailyReset(),
+//             },
+//         })
+//         return
+//     }
+
+//     // Enhanced: Check monthly usage limits
+//     if project.GeminiUsageMonth >= project.GeminiMonthlyLimit {
+//         c.JSON(http.StatusTooManyRequests, gin.H{
+//             "error": "Monthly AI usage limit reached for this project",
+//             "status": "monthly_limit_exceeded",
+//             "usage_info": gin.H{
+//                 "monthly_usage": project.GeminiUsageMonth,
+//                 "monthly_limit": project.GeminiMonthlyLimit,
+//                 "resets_at": getNextMonthlyReset(),
+//             },
+//         })
+//         return
+//     }
+
+//     // Get user info if token provided
+//     var user models.ChatUser
+//     if messageData.UserToken != "" {
+//         userID, err := validateUserToken(messageData.UserToken)
+//         if err == nil {
+//             userCollection := config.DB.Collection("chat_users")
+//             userObjID, _ := primitive.ObjectIDFromHex(userID)
+//             userCollection.FindOne(context.Background(), bson.M{"_id": userObjID}).Decode(&user)
+//         }
+//     }
+
+//     var response string
+//     var inputTokens, outputTokens int
+//     var success bool = true
+//     var errorMsg string
+
+//     // First-message greeting logic + 4-second delay for all responses
+//     time.Sleep(4 * time.Second) // uniform delay for all replies
+
+//     if isFirstMessage(objID, messageData.SessionID) {
+//         response = project.WelcomeMessage
+//     } else if project.GeminiAPIKey != "" {
+//         response, inputTokens, outputTokens, err = generateGeminiResponseWithTracking(
+//             project, messageData.Message, c.ClientIP(), user)
+//         if err != nil {
+//             success = false
+//             errorMsg = err.Error()
+//             if user.Name != "" {
+//                 response = fmt.Sprintf("Hello %s! I'm having trouble answering just now. Please try again later.", user.Name)
+//             } else {
+//                 response = "I'm having trouble answering just now. Please try again later."
+//             }
+//         }
+//     } else {
+//         success = false
+//         errorMsg = "No API key configured"
+//         response = "AI configuration is incomplete. Please contact support."
+//     }
+
+//     // Enhanced: Calculate response time and track usage
+//     responseTime := time.Since(startTime).Milliseconds()
+
+//     // Save message to database with user info
+//     saveMessage(objID, messageData.Message, response, messageData.SessionID, c.ClientIP(), user)
+
+//     // Enhanced: Prepare response with detailed usage information
+//     responseData := gin.H{
+//         "response":   response,
+//         "project_id": projectID,
+//         "status":     "success",
+//         "timestamp":  time.Now().Format(time.RFC3339),
+//         "user_name":  user.Name,
+//         "usage_info": gin.H{
+//             "daily_usage":     project.GeminiUsageToday + 1,
+//             "daily_limit":     project.GeminiDailyLimit,
+//             "daily_remaining": project.GeminiDailyLimit - project.GeminiUsageToday - 1,
+//             "monthly_usage":   project.GeminiUsageMonth + 1,
+//             "monthly_limit":   project.GeminiMonthlyLimit,
+//             "response_time":   responseTime,
+//             "tokens_used":     inputTokens + outputTokens,
+//         },
+//     }
+
+//     if !success {
+//         responseData["status"] = "error"
+//         responseData["error_details"] = errorMsg
+//     }
+
+//     c.JSON(http.StatusOK, responseData)
+// }
+
 func IframeSendMessage(c *gin.Context) {
     projectID := c.Param("projectId")
     startTime := time.Now() // Track response time
-    
+
     objID, err := primitive.ObjectIDFromHex(projectID)
     if err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
@@ -160,12 +317,20 @@ func IframeSendMessage(c *gin.Context) {
         return
     }
 
+    // Generate unique session ID if not provided
+    if messageData.SessionID == "" {
+        messageData.SessionID = "embed_" + time.Now().Format("20060102150405")
+    }
+
     // Sanitize and validate input
     messageData.Message = sanitizeInput(messageData.Message)
     if messageData.Message == "" {
         c.JSON(http.StatusBadRequest, gin.H{"error": "Message cannot be empty"})
         return
     }
+
+    // Delay to prevent 429 error from Google or Render API limits
+    time.Sleep(3 * time.Second)
 
     // Check rate limit
     if !checkRateLimit(c.ClientIP()) {
@@ -295,6 +460,17 @@ func IframeSendMessage(c *gin.Context) {
 
     c.JSON(http.StatusOK, responseData)
 }
+
+
+
+
+
+
+
+
+
+
+
 
 // ===== AI RESPONSE GENERATION =====
 
