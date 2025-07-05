@@ -1,3 +1,7 @@
+package handlers
+
+
+
 import (
     "context"
     "fmt"
@@ -579,21 +583,7 @@ Answer:`, project.Name, userContext, project.PDFContent, userMessage)
 
 // ===== ADDITIONAL UTILITY FUNCTIONS =====
 
-// getWelcomeMessage - Get welcome message for first-time users
-func getWelcomeMessage(customMessage string) string {
-    if customMessage != "" {
-        return customMessage
-    }
-    return "Hello! I'm here to help you with any questions you have. How can I assist you today?"
-}
 
-// getGeminiModel - Get Gemini model name with fallback
-func getGeminiModel(modelName string) string {
-    if modelName == "" {
-        return "gemini-1.5-flash" // Default model
-    }
-    return modelName
-}
 
 // ===== CHAT HISTORY AND ANALYTICS =====
 
