@@ -3,7 +3,7 @@
     class JeviChatWidget {
         constructor(config) {
             this.projectId = config.projectId;
-            this.apiUrl = config.apiUrl || 'http://localhost:8080';
+            this.apiUrl = config.apiUrl || 'https://troikabackend.onrender.com';
             this.position = config.position || 'bottom-right';
             this.theme = config.theme || 'light';
             this.width = config.width || '400px';
