@@ -52,7 +52,7 @@ func main() {
 			"http://localhost:3001",
 			"http://127.0.0.1:3001",
 			"http://localhost:8081",
-			"null",
+			
 		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With", "X-CSRF-Token", "Cache-Control"},
