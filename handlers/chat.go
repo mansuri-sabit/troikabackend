@@ -26,80 +26,83 @@ var rateLimitMutex sync.RWMutex
 // ===== MAIN CHAT HANDLERS =====
 
 func SendMessage(c *gin.Context) {
-    userID := c.GetString("user_id")
-    if userID == "" {
-        c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+    projectID := c.Param("id")
+    sessionID := c.Query("session_id")
+
+    var request struct {
+        Message string `json:"message"`
+    }
+
+    if err := c.ShouldBindJSON(&request); err != nil || request.Message == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message input"})
         return
     }
 
-    userObjID, err := primitive.ObjectIDFromHex(userID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-        return
-    }
-
-    var input struct {
-        Message   string `json:"message"`
-        SessionID string `json:"session_id"`
-    }
-
-    if err := c.ShouldBindJSON(&input); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
-        return
-    }
-
-    input.Message = strings.TrimSpace(input.Message)
-    if input.Message == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Empty message"})
-        return
-    }
-
-    // Generate Session ID if not provided
-    if input.SessionID == "" {
-        input.SessionID = "user_" + time.Now().Format("20060102150405")
-    }
-
-    // Step 1: Get the user's assigned project
-    projectCollection := config.DB.Collection("projects")
+    // Load project
     var project models.Project
-    err = projectCollection.FindOne(context.Background(), bson.M{"user_id": userObjID}).Decode(&project)
+    projectCollection := config.DB.Collection("projects")
+    objID, _ := primitive.ObjectIDFromHex(projectID)
+    err := projectCollection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
     if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found for user"})
+        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
         return
     }
 
-    // Step 2: Check project is active and Gemini is enabled
-    if !project.IsActive {
-        c.JSON(http.StatusForbidden, gin.H{"error": "This chat is currently disabled"})
-        return
-    }
+    // Check Gemini is enabled
     if !project.GeminiEnabled {
-        c.JSON(http.StatusForbidden, gin.H{"error": "Gemini is disabled for this project"})
+        c.JSON(http.StatusForbidden, gin.H{"error": "Gemini is not enabled for this project"})
         return
     }
 
-    // Step 3: Fetch user info
-    var user models.ChatUser
-    userCollection := config.DB.Collection("chat_users")
-    userCollection.FindOne(context.Background(), bson.M{"user_id": userObjID}).Decode(&user)
+    // Check usage limit
+    if !project.IsWithinLimit() {
+        c.JSON(http.StatusForbidden, gin.H{"error": "Gemini usage limit reached"})
+        return
+    }
 
-    // Step 4: Send message to Gemini with project context (PDF content)
-    response, err := config.GenerateResponse(input.Message, project.PDFContent)
+    // Generate AI response
+    userIP := c.ClientIP()
+    user := models.ChatUser{} // Optional: populate if logged in
+    response, inputTokens, outputTokens, err := generateGeminiResponseWithTracking(project, request.Message, userIP, user)
     if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Gemini failed to respond", "details": err.Error()})
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Gemini API error", "details": err.Error()})
         return
     }
 
-    // Optional: Save the message and response in DB
-    go saveMessage(project.ID, input.Message, response, input.SessionID, c.ClientIP(), user)
+    // Save to chat history
+    chatMsg := models.ChatMessage{
+        ProjectID: objID,
+        SessionID: sessionID,
+        Message:   request.Message,
+        Response:  response,
+        IsUser:    true,
+        Timestamp: time.Now(),
+        IPAddress: userIP,
+    }
+    config.DB.Collection("chat_messages").InsertOne(context.Background(), chatMsg)
 
-    // Final response
+    // Update Gemini usage count
+    usageIncrement := inputTokens + outputTokens
+    update := bson.M{
+        "$inc": bson.M{
+            "gemini_usage":        usageIncrement,
+            "gemini_usage_today":  usageIncrement,
+            "gemini_usage_month":  usageIncrement,
+        },
+        "$set": bson.M{"last_used": time.Now()},
+    }
+    projectCollection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
+
+    // Return AI response
     c.JSON(http.StatusOK, gin.H{
-        "response":   response,
-        "session_id": input.SessionID,
-        "timestamp":  time.Now().Format(time.RFC3339),
+        "response": response,
+        "tokens": map[string]int{
+            "input":  inputTokens,
+            "output": outputTokens,
+        },
     })
 }
+
 
 
 
