@@ -1,103 +1,139 @@
 package handlers
 
-
-
 import (
     "context"
     "fmt"
+    "html"
+    "net/http"
+    "strings"
+    "time"
+    "math"
     "github.com/gin-gonic/gin"
-    "github.com/google/generative-ai-go/genai"
     "go.mongodb.org/mongo-driver/bson"
     "go.mongodb.org/mongo-driver/bson/primitive"
     "go.mongodb.org/mongo-driver/mongo/options"
-    "google.golang.org/api/option"
-    "html"
     "jevi-chat/config"
     "jevi-chat/models"
-    "math"
-    "net/http"
-    "strings"
-    "sync"
-    "time"
+    "google.golang.org/api/option"
+    "github.com/google/generative-ai-go/genai"
 )
-
-// ===== GLOBAL VARIABLES FOR RATE LIMITING =====
-var rateLimitMap = make(map[string][]time.Time)
-var rateLimitMutex sync.RWMutex
 
 // ===== MAIN CHAT HANDLERS =====
 
+// SendMessage - For authenticated users in the main dashboard
 func SendMessage(c *gin.Context) {
     projectID := c.Param("id")
-    sessionID := c.Query("session_id")
-
-    var request struct {
-        Message string `json:"message"`
+    var messageData struct {
+        Message   string `json:"message"`
+        SessionID string `json:"session_id"`
     }
-
-    if err := c.ShouldBindJSON(&request); err != nil || request.Message == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message input"})
+    
+    if err := c.ShouldBindJSON(&messageData); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message data"})
         return
     }
-
-    // Load project
+    
+    // Sanitize input
+    messageData.Message = sanitizeInput(messageData.Message)
+    if messageData.Message == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Message cannot be empty"})
+        return
+    }
+    
+    // Check rate limit
+    if !checkRateLimit(c.ClientIP()) {
+        c.JSON(http.StatusTooManyRequests, gin.H{"error": "Rate limit exceeded. Please wait before sending another message."})
+        return
+    }
+    
+    // Get project with PDF content
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+        return
+    }
+    
+    collection := config.DB.Collection("projects")
     var project models.Project
-    projectCollection := config.DB.Collection("projects")
-    objID, _ := primitive.ObjectIDFromHex(projectID)
-    err := projectCollection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
+    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
     if err != nil {
         c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
         return
     }
-
-    // Check Gemini is enabled
-    if !project.GeminiEnabled {
-        c.JSON(http.StatusForbidden, gin.H{"error": "Gemini is not enabled for this project"})
+    
+    // Check if project is active
+    if !project.IsActive {
+        c.JSON(http.StatusForbidden, gin.H{"error": "Project is inactive"})
         return
     }
-
-    // REMOVED: User-specific Gemini usage limit check
-    // Keep only basic project validation
-
-    // Generate AI response
-    userIP := c.ClientIP()
-    user := models.ChatUser{} // Optional: populate if logged in
-    response, inputTokens, outputTokens, err := generateGeminiResponseWithTracking(project, request.Message, userIP, user)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Gemini API error", "details": err.Error()})
-        return
+    
+    var response string
+    var err2 error
+    
+    // Check if Gemini is enabled and within limits
+    if project.GeminiEnabled && project.GeminiUsage < project.GeminiLimit && project.GeminiAPIKey != "" {
+        // First-message greeting logic + 4-second human-like delay
+        if isFirstMessage(objID, messageData.SessionID) {
+            time.Sleep(4 * time.Second)
+            response = project.WelcomeMessage
+        } else {
+            time.Sleep(4 * time.Second) // keep the same pause for regular replies
+            response, err2 = generateAIResponse(
+                messageData.Message,
+                project.PDFContent,
+                project.GeminiAPIKey,
+                project.Name,
+                project.GeminiModel,
+            )
+            if err2 != nil {
+                // Fallback response
+                response = fmt.Sprintf("I apologize, but I'm experiencing technical difficulties with my AI system. However, I received your message about %s and will help you as best I can. Please try rephrasing your question.", project.Name)
+            } else {
+                // Update usage counter asynchronously
+                go updateGeminiUsage(objID)
+            }
+        }
+    } else {
+        // Gemini disabled, limit reached, or no API key
+        time.Sleep(4 * time.Second) // consistent delay even for error messages
+        if !project.GeminiEnabled {
+            response = "AI responses are currently disabled for this project."
+        } else if project.GeminiAPIKey == "" {
+            response = "AI configuration is incomplete. Please contact the administrator."
+        } else {
+            response = "AI usage limit reached for this project. Please contact the administrator to increase the limit."
+        }
     }
-
-    // Save to chat history
-    chatMsg := models.ChatMessage{
+    
+    // Save chat message to database
+    chatMessage := models.ChatMessage{
         ProjectID: objID,
-        SessionID: sessionID,
-        Message:   request.Message,
+        SessionID: messageData.SessionID,
+        Message:   messageData.Message,
         Response:  response,
-        IsUser:    true,
+        IsUser:    false,
         Timestamp: time.Now(),
-        IPAddress: userIP,
+        IPAddress: c.ClientIP(),
     }
-    config.DB.Collection("chat_messages").InsertOne(context.Background(), chatMsg)
-
-    // Update Gemini usage count (for analytics only, no limits)
-    usageIncrement := inputTokens + outputTokens
-    update := bson.M{
-        "$inc": bson.M{
-            "gemini_usage":        usageIncrement,
-            "gemini_usage_today":  usageIncrement,
-            "gemini_usage_month":  usageIncrement,
-        },
-        "$set": bson.M{"last_used": time.Now()},
+    
+    chatCollection := config.DB.Collection("chat_messages")
+    result, err := chatCollection.InsertOne(context.Background(), chatMessage)
+    if err != nil {
+        // Log error but still return response
+        fmt.Printf("Failed to save chat message: %v\n", err)
+    } else {
+        chatMessage.ID = result.InsertedID.(primitive.ObjectID)
     }
-    projectCollection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
-
-    // Return AI response
+    
     c.JSON(http.StatusOK, gin.H{
-        "response": response,
-        "tokens": map[string]int{
-            "input":  inputTokens,
-            "output": outputTokens,
+        "response":    response,
+        "message_id":  chatMessage.ID,
+        "timestamp":   chatMessage.Timestamp,
+        "session_id":  messageData.SessionID,
+        "usage_info": gin.H{
+            "current_usage": project.GeminiUsage + 1,
+            "limit":         project.GeminiLimit,
+            "remaining":     project.GeminiLimit - project.GeminiUsage - 1,
         },
     })
 }
@@ -105,8 +141,8 @@ func SendMessage(c *gin.Context) {
 // IframeSendMessage - For embed widget users with enhanced features
 func IframeSendMessage(c *gin.Context) {
     projectID := c.Param("projectId")
-    startTime := time.Now()
-
+    startTime := time.Now() // Track response time
+    
     objID, err := primitive.ObjectIDFromHex(projectID)
     if err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
@@ -124,11 +160,6 @@ func IframeSendMessage(c *gin.Context) {
         return
     }
 
-    // Generate session ID if not provided
-    if messageData.SessionID == "" {
-        messageData.SessionID = generateSessionID()
-    }
-
     // Sanitize and validate input
     messageData.Message = sanitizeInput(messageData.Message)
     if messageData.Message == "" {
@@ -136,8 +167,8 @@ func IframeSendMessage(c *gin.Context) {
         return
     }
 
-    // Remove user-specific rate limiting - only basic spam protection
-    if !checkBasicRateLimit(c.ClientIP()) {
+    // Check rate limit
+    if !checkRateLimit(c.ClientIP()) {
         c.JSON(http.StatusTooManyRequests, gin.H{"error": "Please wait before sending another message"})
         return
     }
@@ -157,17 +188,42 @@ func IframeSendMessage(c *gin.Context) {
         return
     }
 
-    // Check if Gemini is enabled
+    // Enhanced: Check if Gemini is enabled
     if !project.GeminiEnabled {
         c.JSON(http.StatusForbidden, gin.H{
-            "error":  "AI responses are currently disabled for this project",
+            "error": "AI responses are currently disabled for this project",
             "status": "gemini_disabled",
         })
         return
     }
 
-    // REMOVED: All Gemini usage limit checks for users
-    // Users can now use unlimited Gemini requests
+    // Enhanced: Check daily usage limits
+    if project.GeminiUsageToday >= project.GeminiDailyLimit {
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error": "Daily AI usage limit reached for this project",
+            "status": "daily_limit_exceeded",
+            "usage_info": gin.H{
+                "daily_usage": project.GeminiUsageToday,
+                "daily_limit": project.GeminiDailyLimit,
+                "resets_at": getNextDailyReset(),
+            },
+        })
+        return
+    }
+
+    // Enhanced: Check monthly usage limits
+    if project.GeminiUsageMonth >= project.GeminiMonthlyLimit {
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error": "Monthly AI usage limit reached for this project",
+            "status": "monthly_limit_exceeded",
+            "usage_info": gin.H{
+                "monthly_usage": project.GeminiUsageMonth,
+                "monthly_limit": project.GeminiMonthlyLimit,
+                "resets_at": getNextMonthlyReset(),
+            },
+        })
+        return
+    }
 
     // Get user info if token provided
     var user models.ChatUser
@@ -186,10 +242,10 @@ func IframeSendMessage(c *gin.Context) {
     var errorMsg string
 
     // First-message greeting logic + 4-second delay for all responses
-    time.Sleep(4 * time.Second)
+    time.Sleep(4 * time.Second) // uniform delay for all replies
 
     if isFirstMessage(objID, messageData.SessionID) {
-        response = getWelcomeMessage(project.WelcomeMessage)
+        response = project.WelcomeMessage
     } else if project.GeminiAPIKey != "" {
         response, inputTokens, outputTokens, err = generateGeminiResponseWithTracking(
             project, messageData.Message, c.ClientIP(), user)
@@ -208,13 +264,13 @@ func IframeSendMessage(c *gin.Context) {
         response = "AI configuration is incomplete. Please contact support."
     }
 
-    // Calculate response time
+    // Enhanced: Calculate response time and track usage
     responseTime := time.Since(startTime).Milliseconds()
 
     // Save message to database with user info
     saveMessage(objID, messageData.Message, response, messageData.SessionID, c.ClientIP(), user)
 
-    // Prepare response with unlimited usage information
+    // Enhanced: Prepare response with detailed usage information
     responseData := gin.H{
         "response":   response,
         "project_id": projectID,
@@ -222,12 +278,13 @@ func IframeSendMessage(c *gin.Context) {
         "timestamp":  time.Now().Format(time.RFC3339),
         "user_name":  user.Name,
         "usage_info": gin.H{
-            "unlimited_access": true,
-            "daily_usage":      project.GeminiUsageToday + 1,
-            "monthly_usage":    project.GeminiUsageMonth + 1,
-            "response_time":    responseTime,
-            "tokens_used":      inputTokens + outputTokens,
-            "message":          "Unlimited AI usage enabled",
+            "daily_usage":     project.GeminiUsageToday + 1,
+            "daily_limit":     project.GeminiDailyLimit,
+            "daily_remaining": project.GeminiDailyLimit - project.GeminiUsageToday - 1,
+            "monthly_usage":   project.GeminiUsageMonth + 1,
+            "monthly_limit":   project.GeminiMonthlyLimit,
+            "response_time":   responseTime,
+            "tokens_used":     inputTokens + outputTokens,
         },
     }
 
@@ -239,183 +296,32 @@ func IframeSendMessage(c *gin.Context) {
     c.JSON(http.StatusOK, responseData)
 }
 
-// HandleChatMessage - Alternative handler for project-specific PDF content
-func HandleChatMessage(c *gin.Context) {
-    projectID := c.Param("projectId")
-
-    var messageData struct {
-        Message   string `json:"message"`
-        SessionID string `json:"session_id"`
-        UserToken string `json:"user_token"`
-    }
-
-    if err := c.ShouldBindJSON(&messageData); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid data"})
-        return
-    }
-
-    // Generate session ID if not provided
-    if messageData.SessionID == "" {
-        messageData.SessionID = generateSessionID()
-    }
-
-    // Sanitize input
-    messageData.Message = sanitizeInput(messageData.Message)
-    if messageData.Message == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Message cannot be empty"})
-        return
-    }
-
-    // Validate project
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid project"})
-        return
-    }
-
-    // Get project with PDF content
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil || !project.IsActive {
-        c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "Project not found"})
-        return
-    }
-
-    // Check if Gemini is enabled and has PDF content
-    if !project.GeminiEnabled || project.GeminiAPIKey == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "AI service not enabled"})
-        return
-    }
-
-    if project.PDFContent == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "No knowledge base available. Please upload PDF files first."})
-        return
-    }
-
-    // REMOVED: Project usage limits - unlimited access for users
-
-    // Generate response using project's PDF content
-    response, err := generateResponseWithPDFContent(messageData.Message, project)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to generate response"})
-        return
-    }
-
-    // Save chat message
-    chatMessage := models.ChatMessage{
-        ProjectID: objID,
-        SessionID: messageData.SessionID,
-        Message:   messageData.Message,
-        Response:  response,
-        IsUser:    false,
-        Timestamp: time.Now(),
-        IPAddress: c.ClientIP(),
-    }
-
-    chatCollection := config.DB.Collection("chat_messages")
-    result, _ := chatCollection.InsertOne(context.Background(), chatMessage)
-    if result != nil {
-        chatMessage.ID = result.InsertedID.(primitive.ObjectID)
-    }
-
-    // Update project usage (for analytics only)
-    go updateProjectUsage(objID)
-
-    c.JSON(http.StatusOK, gin.H{
-        "success":    true,
-        "response":   response,
-        "message_id": chatMessage.ID.Hex(),
-        "unlimited":  true,
-    })
-}
-
 // ===== AI RESPONSE GENERATION =====
-
-// generateResponseWithPDFContent - Use project's PDF content for AI response
-func generateResponseWithPDFContent(userMessage string, project models.Project) (string, error) {
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-    defer cancel()
-
-    // Debug log
-    fmt.Printf("DEBUG: Processing message for Project ID: %s, Project Name: %s\n", project.ID.Hex(), project.Name)
-    fmt.Printf("DEBUG: PDF Content Length: %d characters\n", len(project.PDFContent))
-
-    // Check if PDF content is available
-    if project.PDFContent == "" {
-        return "", fmt.Errorf("no PDF content available for project %s", project.Name)
-    }
-
-    // Create Gemini client
-    client, err := genai.NewClient(ctx, option.WithAPIKey(project.GeminiAPIKey))
-    if err != nil {
-        return "", fmt.Errorf("failed to create Gemini client: %v", err)
-    }
-    defer client.Close()
-
-    // Use specified model or default
-    modelName := getGeminiModel(project.GeminiModel)
-    model := client.GenerativeModel(modelName)
-
-    // Configure model for better responses
-    model.SetTemperature(0.85)
-    model.SetTopP(0.9)
-    model.SetTopK(40)
-
-    // Enhanced prompt with project's PDF content
-    prompt := fmt.Sprintf(`You are an AI assistant for %s. Use the following knowledge base to answer user questions accurately and helpfully.
-
-KNOWLEDGE BASE (from uploaded PDFs):
-%s
-
-USER QUESTION: %s
-
-INSTRUCTIONS:
-1. Answer based ONLY on the information provided in the knowledge base above
-2. If the answer is not in the knowledge base, politely say you don't have that information
-3. Be helpful, accurate, and conversational
-4. Provide specific details when available
-5. If relevant, mention which section or document the information comes from
-6. Use a warm, friendly tone (avoid robotic phrases)
-7. Keep it concise: 2-3 well-formed sentences unless detail is essential
-8. Never repeat any word, phrase, or sentence in the same reply
-9. Vary your wording and sentence structure
-
-RESPONSE:`, project.Name, project.PDFContent, userMessage)
-
-    // Generate response
-    resp, err := model.GenerateContent(ctx, genai.Text(prompt))
-    if err != nil {
-        return "", fmt.Errorf("failed to generate content: %v", err)
-    }
-
-    if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
-        return string(resp.Candidates[0].Content.Parts[0].(genai.Text)), nil
-    }
-
-    return "I'm sorry, I couldn't generate a response at this time.", nil
-}
 
 // generateAIResponse - Enhanced AI response generation for authenticated users
 func generateAIResponse(userMessage, pdfContent, geminiKey, projectName, geminiModel string) (string, error) {
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-
+    
     client, err := genai.NewClient(ctx, option.WithAPIKey(geminiKey))
     if err != nil {
         return "", fmt.Errorf("failed to create Gemini client: %v", err)
     }
     defer client.Close()
-
+    
     // Use specified model or default
-    modelName := getGeminiModel(geminiModel)
+    modelName := geminiModel
+    if modelName == "" {
+        modelName = "gemini-1.5-flash"
+    }
+    
     model := client.GenerativeModel(modelName)
-
+    
     // Configure model for better responses
     model.SetTemperature(0.85)
     model.SetTopP(0.9)
     model.SetTopK(40)
-
+    
     // Enhanced prompt with natural tone and anti-repetition
     prompt := fmt.Sprintf(`
 You are a helpful AI assistant for %s. Respond naturally and conversationally without repeating phrases.
@@ -436,16 +342,16 @@ GUIDELINES:
 – End the reply naturally without filler or repetition.
 
 Answer:`, projectName, pdfContent, userMessage)
-
+    
     resp, err := model.GenerateContent(ctx, genai.Text(prompt))
     if err != nil {
         return "", fmt.Errorf("failed to generate content: %v", err)
     }
-
+    
     if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
         return fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0]), nil
     }
-
+    
     return "I'm sorry, I couldn't generate a response at the moment. Please try again.", nil
 }
 
@@ -453,7 +359,7 @@ Answer:`, projectName, pdfContent, userMessage)
 func generateGeminiResponse(project models.Project, userMessage, userIP string, user models.ChatUser) (string, error) {
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-
+    
     client, err := genai.NewClient(ctx, option.WithAPIKey(project.GeminiAPIKey))
     if err != nil {
         return "", err
@@ -461,20 +367,24 @@ func generateGeminiResponse(project models.Project, userMessage, userIP string, 
     defer client.Close()
 
     // Use specified model or default
-    modelName := getGeminiModel(project.GeminiModel)
+    modelName := project.GeminiModel
+    if modelName == "" {
+        modelName = "gemini-1.5-flash"
+    }
+    
     model := client.GenerativeModel(modelName)
-
+    
     // Configure model for better responses
     model.SetTemperature(0.85)
     model.SetTopP(0.9)
     model.SetTopK(40)
-
+    
     // Personalized greeting if user is known
     userContext := ""
     if user.Name != "" {
         userContext = fmt.Sprintf("The user's name is %s. ", user.Name)
     }
-
+    
     // Enhanced prompt with natural tone
     prompt := fmt.Sprintf(`
 You are a helpful AI assistant for %s. %sRespond naturally and conversationally without repeating phrases.
@@ -503,10 +413,10 @@ Answer:`, project.Name, userContext, project.PDFContent, userMessage)
 
     if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
         response := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
-
+        
         // Log usage asynchronously
         go logGeminiUsage(project.ID, userMessage, response, userIP, user)
-
+        
         return response, nil
     }
 
@@ -517,7 +427,7 @@ Answer:`, project.Name, userContext, project.PDFContent, userMessage)
 func generateGeminiResponseWithTracking(project models.Project, userMessage, userIP string, user models.ChatUser) (string, int, int, error) {
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-
+    
     client, err := genai.NewClient(ctx, option.WithAPIKey(project.GeminiAPIKey))
     if err != nil {
         return "", 0, 0, fmt.Errorf("failed to create Gemini client: %v", err)
@@ -525,20 +435,24 @@ func generateGeminiResponseWithTracking(project models.Project, userMessage, use
     defer client.Close()
 
     // Use specified model or default
-    modelName := getGeminiModel(project.GeminiModel)
+    modelName := project.GeminiModel
+    if modelName == "" {
+        modelName = "gemini-1.5-flash"
+    }
+    
     model := client.GenerativeModel(modelName)
-
+    
     // Configure model for better responses
     model.SetTemperature(0.85)
     model.SetTopP(0.9)
     model.SetTopK(40)
-
+    
     // Personalized greeting if user is known
     userContext := ""
     if user.Name != "" {
         userContext = fmt.Sprintf("The user's name is %s. ", user.Name)
     }
-
+    
     // Enhanced prompt with anti-repetition and natural tone instructions
     prompt := fmt.Sprintf(`
 You are a helpful AI assistant for %s. %sRespond naturally and conversationally without repeating phrases.
@@ -567,23 +481,16 @@ Answer:`, project.Name, userContext, project.PDFContent, userMessage)
 
     if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
         response := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
-
+        
         // Estimate token usage (approximate values since Gemini API doesn't return exact counts)
         inputTokens := estimateTokens(prompt)
         outputTokens := estimateTokens(response)
-
-        // Update usage with tokens (for analytics only)
-        go updateProjectUsageWithTokens(project.ID, inputTokens, outputTokens, modelName)
-
+        
         return response, inputTokens, outputTokens, nil
     }
 
     return "", 0, 0, fmt.Errorf("no response generated")
 }
-
-// ===== ADDITIONAL UTILITY FUNCTIONS =====
-
-
 
 // ===== CHAT HISTORY AND ANALYTICS =====
 
@@ -593,23 +500,23 @@ func GetChatHistory(c *gin.Context) {
     sessionID := c.Query("session_id")
     limit := c.DefaultQuery("limit", "50")
     page := c.DefaultQuery("page", "1")
-
+    
     objID, err := primitive.ObjectIDFromHex(projectID)
     if err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
         return
     }
-
+    
     filter := bson.M{"project_id": objID}
     if sessionID != "" {
         filter["session_id"] = sessionID
     }
-
+    
     // Pagination options
     opts := options.Find().
         SetSort(bson.D{{"timestamp", -1}}).
         SetLimit(50) // Max 50 messages per request
-
+    
     collection := config.DB.Collection("chat_messages")
     cursor, err := collection.Find(context.Background(), filter, opts)
     if err != nil {
@@ -617,16 +524,16 @@ func GetChatHistory(c *gin.Context) {
         return
     }
     defer cursor.Close(context.Background())
-
+    
     var messages []models.ChatMessage
     if err := cursor.All(context.Background(), &messages); err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse chat history"})
         return
     }
-
+    
     // Get total count
     totalCount, _ := collection.CountDocuments(context.Background(), filter)
-
+    
     c.JSON(http.StatusOK, gin.H{
         "messages":    messages,
         "count":       len(messages),
@@ -646,28 +553,28 @@ func GetChatAnalytics(c *gin.Context) {
     }
 
     collection := config.DB.Collection("chat_messages")
-
+    
     // Get total messages count
     totalMessages, _ := collection.CountDocuments(context.Background(), bson.M{"project_id": objID})
-
+    
     // Get messages from last 7 days
     weekAgo := time.Now().AddDate(0, 0, -7)
     recentMessages, _ := collection.CountDocuments(context.Background(), bson.M{
         "project_id": objID,
         "timestamp":  bson.M{"$gte": weekAgo},
     })
-
+    
     // Get unique sessions
     pipeline := []bson.M{
         {"$match": bson.M{"project_id": objID}},
         {"$group": bson.M{"_id": "$session_id"}},
         {"$count": "unique_sessions"},
     }
-
+    
     cursor, _ := collection.Aggregate(context.Background(), pipeline)
     var result []bson.M
     cursor.All(context.Background(), &result)
-
+    
     uniqueSessions := int64(0)
     if len(result) > 0 {
         if count, ok := result[0]["unique_sessions"].(int32); ok {
@@ -683,94 +590,10 @@ func GetChatAnalytics(c *gin.Context) {
     })
 }
 
-// RateMessage - Allow users to rate responses
-func RateMessage(c *gin.Context) {
-    messageID := c.Param("messageId")
-    objID, err := primitive.ObjectIDFromHex(messageID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
-        return
-    }
-
-    var rating struct {
-        Rating   int    `json:"rating"` // 1-5 stars
-        Feedback string `json:"feedback"`
-    }
-
-    if err := c.ShouldBindJSON(&rating); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid rating data"})
-        return
-    }
-
-    if rating.Rating < 1 || rating.Rating > 5 {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Rating must be between 1 and 5"})
-        return
-    }
-
-    // Update message with rating
-    collection := config.DB.Collection("chat_messages")
-    _, err = collection.UpdateOne(
-        context.Background(),
-        bson.M{"_id": objID},
-        bson.M{"$set": bson.M{
-            "rating":   rating.Rating,
-            "feedback": rating.Feedback,
-            "rated_at": time.Now(),
-        }},
-    )
-
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save rating"})
-        return
-    }
-
-    c.JSON(http.StatusOK, gin.H{"message": "Rating saved successfully"})
-}
-
-// ===== DEBUG FUNCTIONS =====
-
-// DebugProjectPDFContent - Debug function to check PDF content
-func DebugProjectPDFContent(c *gin.Context) {
-    projectID := c.Param("projectId")
-    objID, err := primitive.ObjectIDFromHex(projectID)
-    if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-        return
-    }
-
-    collection := config.DB.Collection("projects")
-    var project models.Project
-    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-        return
-    }
-
-    c.JSON(http.StatusOK, gin.H{
-        "project_id":          projectID,
-        "project_name":        project.Name,
-        "pdf_files_count":     len(project.PDFFiles),
-        "pdf_content_length":  len(project.PDFContent),
-        "pdf_content_preview": project.PDFContent[:min(500, len(project.PDFContent))],
-        "gemini_enabled":      project.GeminiEnabled,
-        "gemini_model":        project.GeminiModel,
-        "unlimited_access":    true,
-        "usage_info": gin.H{
-            "daily_usage":   project.GeminiUsageToday,
-            "monthly_usage": project.GeminiUsageMonth,
-            "note":          "Usage tracking for analytics only - no limits enforced",
-        },
-    })
-}
-
 // ===== UTILITY FUNCTIONS =====
 
-// generateSessionID - Generate unique session ID
-func generateSessionID() string {
-    return fmt.Sprintf("session_%d_%s", time.Now().Unix(), primitive.NewObjectID().Hex()[:8])
-}
-
-// isFirstMessage returns true the very first time a given session_id is seen for the project
+// isFirstMessage returns true the very first time a given session_id
+// is seen for the project. It works by counting existing chat_messages.
 func isFirstMessage(projectID primitive.ObjectID, sessionID string) bool {
     count, _ := config.DB.Collection("chat_messages").
         CountDocuments(context.Background(), bson.M{
@@ -791,14 +614,14 @@ func saveMessage(projectID primitive.ObjectID, message, response, sessionID, use
         Timestamp: time.Now(),
         IPAddress: userIP,
     }
-
+    
     // Add user info if available
     if user.ID != primitive.NilObjectID {
         chatMessage.UserID = user.ID
         chatMessage.UserName = user.Name
         chatMessage.UserEmail = user.Email
     }
-
+    
     chatCollection := config.DB.Collection("chat_messages")
     _, err := chatCollection.InsertOne(context.Background(), chatMessage)
     if err != nil {
@@ -806,84 +629,40 @@ func saveMessage(projectID primitive.ObjectID, message, response, sessionID, use
     }
 }
 
-// updateProjectUsage - Update usage counters (for analytics only)
-func updateProjectUsage(projectID primitive.ObjectID) {
+// updateGeminiUsage - Update usage counters
+func updateGeminiUsage(projectID primitive.ObjectID) {
     collection := config.DB.Collection("projects")
-
-    now := time.Now()
-    update := bson.M{
-        "$inc": bson.M{
-            "gemini_usage":       1,
-            "gemini_usage_today": 1,
-            "gemini_usage_month": 1,
-            "total_questions":    1,
+    _, err := collection.UpdateOne(
+        context.Background(),
+        bson.M{"_id": projectID},
+        bson.M{
+            "$inc": bson.M{"gemini_usage": 1, "total_questions": 1},
+            "$set": bson.M{"last_used": time.Now()},
         },
-        "$set": bson.M{
-            "last_used": now,
-        },
-    }
-
-    _, err := collection.UpdateOne(context.Background(), bson.M{"_id": projectID}, update)
+    )
     if err != nil {
         fmt.Printf("Failed to update Gemini usage: %v\n", err)
     }
 }
 
-// updateProjectUsageWithTokens - Update usage with detailed token tracking (for analytics only)
-func updateProjectUsageWithTokens(projectID primitive.ObjectID, inputTokens, outputTokens int, model string) {
-    collection := config.DB.Collection("projects")
-
-    // Calculate cost
-    cost := calculateGeminiCost(model, inputTokens, outputTokens)
-
-    update := bson.M{
-        "$inc": bson.M{
-            "gemini_usage":         1,
-            "gemini_usage_today":   1,
-            "gemini_usage_month":   1,
-            "total_questions":      1,
-            "estimated_cost_today": cost,
-            "estimated_cost_month": cost,
-        },
-        "$set": bson.M{
-            "last_used": time.Now(),
-        },
-    }
-
-    _, err := collection.UpdateOne(context.Background(), bson.M{"_id": projectID}, update)
-    if err != nil {
-        fmt.Printf("Failed to update Gemini usage with tokens: %v\n", err)
-    }
-}
-
-// logGeminiUsage - Enhanced usage logging with complete details
+// logGeminiUsage - Log detailed usage information
 func logGeminiUsage(projectID primitive.ObjectID, question, response, userIP string, user models.ChatUser) {
-    usageLog := models.GeminiUsageLog{
-        ProjectID:    projectID,
-        Question:     question,
-        Response:     response,
-        Timestamp:    time.Now(),
-        UserIP:       userIP,
-        Success:      true,
-        ResponseTime: 4000, // 4 seconds (your fixed delay)
+    log := models.GeminiUsageLog{
+        ProjectID: projectID,
+        Question:  question,
+        Response:  response,
+        Timestamp: time.Now(),
+        UserIP:    userIP,
     }
-
+    
     // Add user info if available
     if user.ID != primitive.NilObjectID {
-        usageLog.UserID = user.ID
-        usageLog.UserName = user.Name
+        log.UserID = user.ID
+        log.UserName = user.Name
     }
 
-    // Estimate tokens and cost
-    inputTokens := estimateTokens(question)
-    outputTokens := estimateTokens(response)
-    usageLog.InputTokens = inputTokens
-    usageLog.OutputTokens = outputTokens
-    usageLog.TokensUsed = inputTokens + outputTokens
-    usageLog.EstimatedCost = calculateGeminiCost("gemini-1.5-flash", inputTokens, outputTokens)
-
     collection := config.DB.Collection("gemini_usage_logs")
-    _, err := collection.InsertOne(context.Background(), usageLog)
+    _, err := collection.InsertOne(context.Background(), log)
     if err != nil {
         fmt.Printf("Failed to log Gemini usage: %v\n", err)
     }
@@ -893,41 +672,19 @@ func logGeminiUsage(projectID primitive.ObjectID, question, response, userIP str
 func sanitizeInput(input string) string {
     // Remove HTML tags and trim whitespace
     cleaned := html.EscapeString(strings.TrimSpace(input))
-
+    
     // Limit message length
     if len(cleaned) > 1000 {
         cleaned = cleaned[:1000]
     }
-
+    
     return cleaned
 }
 
-// checkBasicRateLimit - Basic rate limiting to prevent spam (more relaxed)
-func checkBasicRateLimit(userIP string) bool {
-    rateLimitMutex.Lock()
-    defer rateLimitMutex.Unlock()
-
-    now := time.Now()
-    windowStart := now.Add(-time.Minute) // 1-minute window
-
-    // Clean old entries
-    if timestamps, exists := rateLimitMap[userIP]; exists {
-        var validTimestamps []time.Time
-        for _, timestamp := range timestamps {
-            if timestamp.After(windowStart) {
-                validTimestamps = append(validTimestamps, timestamp)
-            }
-        }
-        rateLimitMap[userIP] = validTimestamps
-    }
-
-    // More relaxed limit (30 requests per minute instead of 10)
-    if len(rateLimitMap[userIP]) >= 30 {
-        return false
-    }
-
-    // Add current request
-    rateLimitMap[userIP] = append(rateLimitMap[userIP], now)
+// checkRateLimit - Simple rate limiting (implement with Redis for production)
+func checkRateLimit(userIP string) bool {
+    // For now, return true. In production, implement Redis-based rate limiting
+    // Allow max 10 messages per minute per IP
     return true
 }
 
@@ -937,38 +694,82 @@ func validateUserToken(token string) (string, error) {
     if len(token) < 24 {
         return "", fmt.Errorf("invalid token")
     }
-
+    
     // Extract user ID from token (first 24 characters should be ObjectID)
     userID := token[:24]
-
+    
     // Validate if it's a valid ObjectID
     _, err := primitive.ObjectIDFromHex(userID)
     if err != nil {
         return "", fmt.Errorf("invalid user ID in token")
     }
-
+    
     return userID, nil
+}
+
+// RateMessage - Allow users to rate responses
+func RateMessage(c *gin.Context) {
+    messageID := c.Param("messageId")
+    objID, err := primitive.ObjectIDFromHex(messageID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
+        return
+    }
+    
+    var rating struct {
+        Rating   int    `json:"rating"`   // 1-5 stars
+        Feedback string `json:"feedback"`
+    }
+    
+    if err := c.ShouldBindJSON(&rating); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid rating data"})
+        return
+    }
+    
+    if rating.Rating < 1 || rating.Rating > 5 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Rating must be between 1 and 5"})
+        return
+    }
+    
+    // Update message with rating
+    collection := config.DB.Collection("chat_messages")
+    _, err = collection.UpdateOne(
+        context.Background(),
+        bson.M{"_id": objID},
+        bson.M{"$set": bson.M{
+            "rating":          rating.Rating,
+            "feedback":        rating.Feedback,
+            "rated_at":        time.Now(),
+        }},
+    )
+    
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save rating"})
+        return
+    }
+    
+    c.JSON(http.StatusOK, gin.H{"message": "Rating saved successfully"})
 }
 
 // calculateGeminiCost - Cost calculation function
 func calculateGeminiCost(model string, inputTokens, outputTokens int) float64 {
     var inputCostPer1K, outputCostPer1K float64
-
+    
     switch model {
     case "gemini-1.5-flash":
-        inputCostPer1K = 0.000075 // $0.075 per 1K input tokens
-        outputCostPer1K = 0.0003  // $0.30 per 1K output tokens
+        inputCostPer1K = 0.000075   // $0.075 per 1K input tokens
+        outputCostPer1K = 0.0003    // $0.30 per 1K output tokens
     case "gemini-1.5-pro":
-        inputCostPer1K = 0.00125 // $1.25 per 1K input tokens
-        outputCostPer1K = 0.005  // $5.00 per 1K output tokens
+        inputCostPer1K = 0.00125    // $1.25 per 1K input tokens
+        outputCostPer1K = 0.005     // $5.00 per 1K output tokens
     default:
-        inputCostPer1K = 0.000075 // Default to Flash pricing
+        inputCostPer1K = 0.000075   // Default to Flash pricing
         outputCostPer1K = 0.0003
     }
-
+    
     inputCost := (float64(inputTokens) / 1000.0) * inputCostPer1K
     outputCost := (float64(outputTokens) / 1000.0) * outputCostPer1K
-
+    
     return math.Round((inputCost+outputCost)*100000) / 100000
 }
 
@@ -988,21 +789,6 @@ func getNextMonthlyReset() string {
 // estimateTokens - Helper function to estimate token count
 func estimateTokens(text string) int {
     // Rough estimation: 1 token ≈ 4 characters for English text
+    // This is an approximation since exact tokenization varies by model
     return len(text) / 4
-}
-
-// min - Helper function for minimum of two integers
-func min(a, b int) int {
-    if a < b {
-        return a
-    }
-    return b
-}
-
-// max - Helper function for maximum of two integers
-func max(a, b int) int {
-    if a > b {
-        return a
-    }
-    return b
 }
