@@ -92,8 +92,7 @@ func Login(c *gin.Context) {
         Email    string `json:"email" form:"email"`
         Password string `json:"password" form:"password"`
     }
-    
-    // Bind both JSON and form data
+
     if err := c.ShouldBind(&loginData); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{
             "success": false,
@@ -101,32 +100,57 @@ func Login(c *gin.Context) {
         })
         return
     }
-    
-    // Check admin credentials
+
     adminEmail := os.Getenv("ADMIN_EMAIL")
     adminPassword := os.Getenv("ADMIN_PASSWORD")
-    
+
     if loginData.Email == adminEmail && loginData.Password == adminPassword {
-        // Generate admin JWT token
         token := generateJWT("admin", true)
         c.SetCookie("token", token, 3600*24, "/", "", false, true)
-        
-        // Always return JSON for AJAX requests
+
         c.JSON(http.StatusOK, gin.H{
             "success": true,
             "message": "Admin login successful",
-            "redirect": "/admin",
+            "token": token,
+            "redirect": "/admin/dashboard",
         })
         return
     }
-    
-    // Check regular user credentials (if needed)
-    // ... user login logic here
-    
-    // Invalid credentials
-    c.JSON(http.StatusUnauthorized, gin.H{
-        "success": false,
-        "error": "Invalid email or password",
+
+    // ✅ Now handle regular user login
+    var user models.User
+    collection := config.DB.Collection("users")
+
+    err := collection.FindOne(context.Background(), bson.M{"email": loginData.Email}).Decode(&user)
+    if err != nil {
+        c.JSON(http.StatusUnauthorized, gin.H{
+            "success": false,
+            "error": "User not found",
+        })
+        return
+    }
+
+    if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(loginData.Password)); err != nil {
+        c.JSON(http.StatusUnauthorized, gin.H{
+            "success": false,
+            "error": "Invalid credentials",
+        })
+        return
+    }
+
+    token := generateJWT(user.ID.Hex(), false)
+    c.SetCookie("token", token, 3600*24, "/", "", false, true)
+
+    c.JSON(http.StatusOK, gin.H{
+        "success": true,
+        "message": "Login successful",
+        "token": token,
+        "redirect": "/user/dashboard",
+        "user": gin.H{
+            "id": user.ID.Hex(),
+            "username": user.Username,
+            "email": user.Email,
+        },
     })
 }
 

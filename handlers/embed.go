@@ -196,7 +196,7 @@ func IframeChatInterface(c *gin.Context) {
     // ✅ Render the chat.html template
     c.HTML(http.StatusOK, "embed/chat.html", gin.H{
         "project":     project,
-        "project_id":  projectID,
+        "project_id":  project.ID.Hex(),
         "api_url":     os.Getenv("APP_URL"), // e.g. https://troikabackend.onrender.com
     })
 }

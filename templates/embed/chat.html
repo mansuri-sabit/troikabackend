@@ -132,6 +132,7 @@
     <script>
         const projectId = '{{.project_id}}';
         const apiUrl = 'https://troikabackend.onrender.com';
+        const sessionId = 'embed_' + Date.now();
         
         function addMessage(message, isUser = false) {
             const messagesContainer = document.getElementById('chatMessages');
@@ -142,39 +143,40 @@
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
         
-        async function sendMessage() {
-            const input = document.getElementById('messageInput');
-            const message = input.value.trim();
-            
-            if (!message) return;
-            
-            addMessage(message, true);
-            input.value = '';
-            
-            try {
-                const response = await fetch(`${apiUrl}/chat/${projectId}/message`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ 
-                        message: message,
-                        session_id: 'embed_' + Date.now()
-                    })
-                });
-                
-                const data = await response.json();
-                
-                if (data.response) {
-                    addMessage(data.response);
-                } else {
-                    addMessage('Thank you for your message!');
-                }
-            } catch (error) {
-                console.error('Error:', error);
-                addMessage('Sorry, there was an error sending your message.');
-            }
+    async function sendMessage() {
+    const input = document.getElementById('messageInput');
+    const message = input.value.trim();
+    if (!message) return;
+
+    addMessage(message, true);
+    input.value = '';
+
+    try {
+        const response = await fetch(`${apiUrl}/chat/${projectId}/message`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ 
+                message,
+                session_id: sessionId  // consistent session
+            })
+        });
+
+        const data = await response.json();
+
+        if (data?.response) {
+            addMessage(data.response);
+        } else if (data?.error) {
+            addMessage(data.error);
+        } else {
+            addMessage("Thank you for your message!");
         }
+    } catch (error) {
+        console.error('Fetch error:', error);
+        addMessage("Sorry, we couldn’t process your message.");
+    }
+}
         
         document.getElementById('messageInput').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
