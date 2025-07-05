@@ -174,32 +174,10 @@ func IframeSendMessage(c *gin.Context) {
 	}
 
 	// Enhanced: Check daily usage limits
-	if project.GeminiUsageToday >= project.GeminiDailyLimit {
-		c.JSON(http.StatusTooManyRequests, gin.H{
-			"error":  "Daily AI usage limit reached for this project",
-			"status": "daily_limit_exceeded",
-			"usage_info": gin.H{
-				"daily_usage": project.GeminiUsageToday,
-				"daily_limit": project.GeminiDailyLimit,
-				"resets_at":   getNextDailyReset(),
-			},
-		})
-		return
-	}
+
 
 	// Enhanced: Check monthly usage limits
-	if project.GeminiUsageMonth >= project.GeminiMonthlyLimit {
-		c.JSON(http.StatusTooManyRequests, gin.H{
-			"error":  "Monthly AI usage limit reached for this project",
-			"status": "monthly_limit_exceeded",
-			"usage_info": gin.H{
-				"monthly_usage": project.GeminiUsageMonth,
-				"monthly_limit": project.GeminiMonthlyLimit,
-				"resets_at":     getNextMonthlyReset(),
-			},
-		})
-		return
-	}
+
 
 	// Get user info if token provided
 	var user models.ChatUser
