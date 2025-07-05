@@ -178,26 +178,29 @@ func EmbedAuth(c *gin.Context) {
 
 // GET /embed/:projectId/chat - Health check or future UI
 func IframeChatInterface(c *gin.Context) {
-	projectID := c.Param("projectId")
+    projectID := c.Param("projectId")
 
-	objID, err := primitive.ObjectIDFromHex(projectID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
-		return
-	}
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        c.String(http.StatusBadRequest, "Invalid project ID")
+        return
+    }
 
-	var project models.Project
-	err = config.DB.Collection("projects").FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
-		return
-	}
+    var project models.Project
+    err = config.DB.Collection("projects").FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
+    if err != nil {
+        c.String(http.StatusNotFound, "Project not found")
+        return
+    }
 
-	c.JSON(http.StatusOK, gin.H{
-		"project": project,
-		"status":  "active",
-	})
+    // ✅ Render the chat.html template
+    c.HTML(http.StatusOK, "embed/chat.html", gin.H{
+        "project":     project,
+        "project_id":  projectID,
+        "api_url":     os.Getenv("APP_URL"), // e.g. https://troikabackend.onrender.com
+    })
 }
+
 
 // Simple health check
 func EmbedHealth(c *gin.Context) {
