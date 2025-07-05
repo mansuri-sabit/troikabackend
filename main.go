@@ -183,4 +183,6 @@ func setupRoutes(r *gin.Engine) {
             "method":  c.Request.Method,
         })
     })
+
+    
 }
