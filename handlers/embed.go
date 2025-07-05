@@ -226,3 +226,37 @@ func generateUserToken(userID string) string {
 	rand.Read(bytes)
 	return fmt.Sprintf("%s_%s_%d", userID, hex.EncodeToString(bytes), time.Now().Unix())
 }
+
+// GET /embed/:projectId/auth - Show authentication page
+func ShowEmbedAuth(c *gin.Context) {
+    projectID := c.Param("projectId")
+    
+    // Validate project ID
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        c.HTML(http.StatusOK, "error.html", gin.H{"error": "Invalid project ID"})
+        return
+    }
+    
+    // Get project details
+    collection := config.DB.Collection("projects")
+    var project models.Project
+    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
+    if err != nil {
+        c.HTML(http.StatusOK, "error.html", gin.H{"error": "Project not found"})
+        return
+    }
+    
+    // Check if project is active
+    if !project.IsActive {
+        c.HTML(http.StatusOK, "error.html", gin.H{"error": "Project is inactive"})
+        return
+    }
+    
+    // Render authentication page
+    c.HTML(http.StatusOK, "embed/auth.html", gin.H{
+        "project":    project,
+        "project_id": projectID,
+        "api_url":    os.Getenv("APP_URL"),
+    })
+}

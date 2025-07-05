@@ -4,7 +4,7 @@ import (
     "context"
     "log"
     "os"
-    
+    "fmt"
     "github.com/google/generative-ai-go/genai"
     "google.golang.org/api/option"
 )
@@ -39,7 +39,9 @@ func GenerateResponse(prompt string, pdfContext string) (string, error) {
     
     resp, err := model.GenerateContent(ctx, genai.Text(fullPrompt))
     if err != nil {
-        return "", err
+        // Log specific error for debugging API quota issues
+        log.Printf("Failed to generate content: %v", err)
+        return "", fmt.Errorf("failed to generate content: %v", err)
     }
     
     if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {

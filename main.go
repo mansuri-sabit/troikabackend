@@ -59,10 +59,18 @@ func main() {
 	// Setup Routes
 	setupRoutes(r)
 
-	// Embed endpoints
-	r.GET("/embed/:projectId", handlers.EmbedChat)
-	r.POST("/embed/:projectId/auth", handlers.EmbedAuth)
-	r.GET("/embed/:projectId/chat", handlers.IframeChatInterface)
+	// ✅ FIXED: Embed endpoints with proper route organization
+	embedGroup := r.Group("/embed/:projectId")
+	{
+		embedGroup.GET("", handlers.EmbedChat)                    // Main embed page
+		embedGroup.GET("/auth", handlers.EmbedAuth)               // ✅ NEW: GET auth page
+		embedGroup.POST("/auth", handlers.EmbedAuth)              // ✅ EXISTING: POST auth submission
+		embedGroup.GET("/chat", handlers.IframeChatInterface)     // Chat interface
+		embedGroup.POST("/message", handlers.IframeSendMessage)   // Send message
+	}
+
+	// ✅ NEW: Embed health check
+	r.GET("/embed/health", handlers.EmbedHealth)
 
 	// Chat widget JS and CSS
 	r.GET("/widget.js", func(c *gin.Context) {
