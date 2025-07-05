@@ -71,7 +71,9 @@ func main() {
     }
 
     log.Printf("\U0001F680 Jevi Chat Server starting on port %s", port)
-    log.Fatal(http.ListenAndServe(":"+port, r))
+    
+    // ✅ CRITICAL FIX FOR RENDER: Added "0.0.0.0:" host binding
+    log.Fatal(http.ListenAndServe("0.0.0.0:"+port, r))
 }
 
 func setupRoutes(r *gin.Engine) {
@@ -183,6 +185,4 @@ func setupRoutes(r *gin.Engine) {
             "method":  c.Request.Method,
         })
     })
-
-    
 }
