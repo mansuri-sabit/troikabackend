@@ -20,30 +20,21 @@ func main() {
         log.Println("Warning: .env file not found")
     }
 
-    // Initialize database and Gemini
     config.InitMongoDB()
     config.InitGemini()
 
-    // Setup router
     r := gin.Default()
-
-    // Load templates and static files
-    r.LoadHTMLGlob("templates/**/*.html") // ✅ Supports nested folders
+    r.LoadHTMLGlob("templates/**/*.html")
     r.Static("/static", "./static")
 
-    // CORS middleware (fixes your error)
     corsConfig := cors.Config{
         AllowOrigins: []string{
-            "http://localhost:8080",
-           "https://troikafrontend.onrender.com",
+            "https://troikafrontend.onrender.com",
             "http://localhost:3000",
             "http://127.0.0.1:3000",
             "http://localhost:3001",
             "http://127.0.0.1:3001",
-           
-            "http://localhost:3000",   // CRA dev server
-            "http://localhost:8081",   // if you proxy
-            
+            "http://localhost:8081",
         },
         AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"},
         AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With", "X-CSRF-Token", "Cache-Control"},
@@ -53,7 +44,6 @@ func main() {
     }
     r.Use(cors.New(corsConfig))
 
-    // Add iframe-specific headers (optional, if needed)
     r.Use(func(c *gin.Context) {
         c.Header("X-Frame-Options", "ALLOWALL")
         c.Header("Content-Security-Policy", "frame-ancestors *")
@@ -64,12 +54,10 @@ func main() {
 
     setupRoutes(r)
 
-    // Embed routes
     r.GET("/embed/:projectId", handlers.EmbedChat)
     r.POST("/embed/:projectId/auth", handlers.EmbedAuth)
     r.GET("/embed/:projectId/chat", handlers.IframeChatInterface)
 
-    // Widget API
     r.GET("/widget.js", func(c *gin.Context) {
         c.File("./static/js/jevi-chat-widget.js")
     })
@@ -78,23 +66,15 @@ func main() {
     })
 
     port := os.Getenv("PORT")
-    if port == "" {
+    if port == "" || len(port) > 5 {
         port = "8080"
     }
 
-    log.Printf("🚀 Jevi Chat Server starting on port %s", port)
-    log.Printf("✅ CORS configured for React frontend")
-    log.Printf("🌐 Frontend URL: http://localhost:3000")
-    log.Printf("🔗 Backend URL: http://localhost:%s", port)
-    log.Printf("📊 Health check: http://localhost:%s/health", port)
-    log.Printf("🤖 Embed URL: http://localhost:%s/embed/PROJECT_ID", port)
-    log.Printf("📱 Widget Script: http://localhost:%s/widget.js", port)
-
+    log.Printf("\U0001F680 Jevi Chat Server starting on port %s", port)
     log.Fatal(http.ListenAndServe(":"+port, r))
 }
 
 func setupRoutes(r *gin.Engine) {
-    // Health check
     r.GET("/health", func(c *gin.Context) {
         c.JSON(http.StatusOK, gin.H{
             "status":    "healthy",
@@ -106,7 +86,6 @@ func setupRoutes(r *gin.Engine) {
         })
     })
 
-    // CORS test endpoint
     r.GET("/cors-test", func(c *gin.Context) {
         c.JSON(http.StatusOK, gin.H{
             "message": "CORS is working!",
@@ -116,14 +95,11 @@ func setupRoutes(r *gin.Engine) {
         })
     })
 
-    // Public routes
-
     r.POST("/login", handlers.Login)
     r.GET("/logout", handlers.Logout)
     r.GET("/register", handlers.RegisterPage)
     r.POST("/register", handlers.Register)
 
-    // API routes for React frontend
     api := r.Group("/api")
     {
         api.POST("/login", handlers.Login)
@@ -141,7 +117,6 @@ func setupRoutes(r *gin.Engine) {
         api.GET("/admin/realtime-stats", handlers.GetRealtimeStats)
     }
 
-    // Admin routes
     admin := r.Group("/admin")
     admin.Use(func(c *gin.Context) {
         if c.Request.Method == "OPTIONS" {
@@ -160,19 +135,14 @@ func setupRoutes(r *gin.Engine) {
         admin.DELETE("/projects/:id", handlers.DeleteProject)
         admin.GET("/users", handlers.AdminUsers)
         admin.DELETE("/users/:id", handlers.DeleteUser)
-
-        // Gemini Management
         admin.PATCH("/projects/:id/gemini/toggle", handlers.ToggleGeminiStatus)
         admin.PATCH("/projects/:id/gemini/limit", handlers.SetGeminiLimit)
         admin.POST("/projects/:id/gemini/reset", handlers.ResetGeminiUsage)
         admin.GET("/projects/:id/gemini/analytics", handlers.GetGeminiAnalytics)
-        
-        // PDF Management
         admin.POST("/projects/:id/upload-pdf", handlers.UploadPDF)
         admin.DELETE("/projects/:id/pdf/:fileId", handlers.DeletePDF)
     }
 
-    // User routes - FIXED VERSION
     user := r.Group("/user")
     user.Use(func(c *gin.Context) {
         if c.Request.Method == "OPTIONS" {
@@ -185,20 +155,17 @@ func setupRoutes(r *gin.Engine) {
         user.GET("/dashboard", handlers.UserDashboard)
         user.GET("/project/:id", handlers.ProjectDashboard)
         user.GET("/chat/:id", handlers.IframeChatInterface)
-        user.POST("/chat/:id/message", handlers.SendMessage)    // Use SendMessage for authenticated users
+        user.POST("/chat/:id/message", handlers.SendMessage)
         user.POST("/project/:id/upload", handlers.UploadPDF)
         user.GET("/chat/:id/history", handlers.GetChatHistory)
-        // REMOVED: duplicate user.POST("/chat/:id/message", handlers.SendMessage)
     }
 
-    // Public chat routes (for embed widgets)
     chat := r.Group("/chat")
     {
-        chat.POST("/:projectId/message", handlers.IframeSendMessage)  // Use IframeSendMessage for public/embed
+        chat.POST("/:projectId/message", handlers.IframeSendMessage)
         chat.GET("/:projectId/history", handlers.GetChatHistory)
     }
 
-    // Error handlers
     r.NoRoute(func(c *gin.Context) {
         c.JSON(http.StatusNotFound, gin.H{
             "error":   "Route not found",
