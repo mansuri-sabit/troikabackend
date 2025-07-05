@@ -28,7 +28,7 @@ func main() {
     r := gin.Default()
 
     // Load templates and static files
-   
+    r.LoadHTMLGlob("templates/**/*.html") // ✅ Supports nested folders
     r.Static("/static", "./static")
 
     // CORS middleware (fixes your error)
