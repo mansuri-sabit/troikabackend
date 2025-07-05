@@ -78,7 +78,7 @@ func main() {
 
     port := os.Getenv("PORT")
     if port == "" {
-        port = "8080"
+        port = "https://troikabackend.onrender.com"
     }
 
     log.Printf("🚀 Jevi Chat Server starting on port %s", port)
