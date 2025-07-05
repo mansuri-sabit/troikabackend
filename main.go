@@ -20,6 +20,8 @@ func main() {
 		log.Println("Warning: .env file not found")
 	}
 
+
+
 	// Initialize MongoDB and Gemini
 	config.InitMongoDB()
 	config.InitGemini()
@@ -28,11 +30,19 @@ func main() {
 	handlers.InitRateLimiters()
 	log.Println("✅ Rate limiters initialized")
 
+
+
+
 	// Set up Gin
 	r := gin.Default()
 	r.LoadHTMLGlob("templates/**/*.html")
 	r.Static("/static", "./static")
 
+	    // Add CORS debug middleware only in development
+    if gin.Mode() == gin.DebugMode {
+        r.Use(handlers.CORSDebugMiddleware())
+        log.Println("🔍 CORS debugging enabled")
+    }
 	// CORS setup
 	corsConfig := cors.Config{
 		AllowOrigins: []string{
@@ -42,6 +52,7 @@ func main() {
 			"http://localhost:3001",
 			"http://127.0.0.1:3001",
 			"http://localhost:8081",
+			"null",
 		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With", "X-CSRF-Token", "Cache-Control"},
@@ -50,6 +61,12 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}
 	r.Use(cors.New(corsConfig))
+
+	// Add conditional null origin for development
+if gin.Mode() == gin.DebugMode {
+    corsConfig.AllowOrigins = append(corsConfig.AllowOrigins, "null")
+    log.Println("🔍 CORS: Allowing 'null' origin for development")
+}
 
 	// Iframe & security headers
 	r.Use(func(c *gin.Context) {

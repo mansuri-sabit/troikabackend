@@ -8,7 +8,7 @@ import (
     "strings"
     "time"
     "math"
-
+    "log"
     "sync"
     "github.com/gin-gonic/gin"
     "go.mongodb.org/mongo-driver/bson"
@@ -979,8 +979,15 @@ func estimateTokens(text string) int {
 // RateLimitMiddleware creates a rate limiting middleware for different endpoint types
 func RateLimitMiddleware(limiterType string) gin.HandlerFunc {
     return func(c *gin.Context) {
+        // Skip rate limiting for OPTIONS requests (CORS preflight)
+        if c.Request.Method == "OPTIONS" {
+            c.Next()
+            return
+        }
+        
         clientIP := c.ClientIP()
         
+        // Your existing rate limiting logic...
         var allowed bool
         var remaining int
         
@@ -1001,7 +1008,6 @@ func RateLimitMiddleware(limiterType string) gin.HandlerFunc {
             allowed = generalRateLimiter.Allow(clientIP)
             remaining = generalRateLimiter.GetRemainingRequests(clientIP)
         default:
-            // Default to general rate limiter
             allowed = generalRateLimiter.Allow(clientIP)
             remaining = generalRateLimiter.GetRemainingRequests(clientIP)
         }
@@ -1025,8 +1031,38 @@ func RateLimitMiddleware(limiterType string) gin.HandlerFunc {
             return
         }
         
-        // Continue to next middleware/handler
         c.Next()
     }
 }
 
+
+// CORSDebugMiddleware logs CORS-related information for debugging
+// CORSDebugMiddleware provides CORS debugging information
+func CORSDebugMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        // Only debug in development mode
+        if gin.Mode() == gin.DebugMode {
+            origin := c.Request.Header.Get("Origin")
+            method := c.Request.Method
+            
+            log.Printf("🔍 CORS Debug - Origin: %s, Method: %s, Path: %s", 
+                origin, method, c.Request.URL.Path)
+            
+            // Log CORS-related headers
+            corsHeaders := []string{
+                "Origin",
+                "Access-Control-Request-Method",
+                "Access-Control-Request-Headers",
+                "Referer",
+            }
+            
+            for _, header := range corsHeaders {
+                if value := c.Request.Header.Get(header); value != "" {
+                    log.Printf("  %s: %s", header, value)
+                }
+            }
+        }
+        
+        c.Next()
+    }
+}
