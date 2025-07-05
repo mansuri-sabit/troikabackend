@@ -8,7 +8,7 @@ import (
     "time"
     "crypto/rand"
     "encoding/hex"
-    
+    "os"
     "github.com/gin-gonic/gin"
     "go.mongodb.org/mongo-driver/bson"
     "go.mongodb.org/mongo-driver/bson/primitive"
@@ -25,7 +25,7 @@ func EmbedChat(c *gin.Context) {
         // Show pre-chat authentication form
         c.HTML(http.StatusOK, "prechat.html", gin.H{
             "project_id": projectID,
-            "api_url":    "https://b536-150-107-16-191.ngrok-free.app", // Update with your current ngrok URL
+            "api_url":    os.Getenv("APP_URL"), 
         })
         return
     }
@@ -80,7 +80,7 @@ func EmbedChat(c *gin.Context) {
     c.HTML(http.StatusOK, "chat.html", gin.H{
         "project":    project,
         "project_id": projectID,
-        "api_url":    "https://b536-150-107-16-191.ngrok-free.app",
+        "api_url":    os.Getenv("APP_URL"),
         "user":       user,
         "user_token": userToken,
     })

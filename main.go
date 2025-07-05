@@ -40,7 +40,7 @@ func main() {
             "http://127.0.0.1:3000",
             "http://localhost:3001",
             "http://127.0.0.1:3001",
-            "https://155b-150-107-16-191.ngrok-free.app",
+           
                 "http://localhost:3000",   // CRA dev server
         "http://localhost:8081",   // if you proxy
             
