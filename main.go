@@ -20,19 +20,29 @@ func main() {
 		log.Println("Warning: .env file not found")
 	}
 
+
+
 	// Initialize MongoDB and Gemini
 	config.InitMongoDB()
 	config.InitGemini()
 
-	// Initialize rate limiters
+	// ✅ NEW: Initialize rate limiters
 	handlers.InitRateLimiters()
 	log.Println("✅ Rate limiters initialized")
+
+
+
 
 	// Set up Gin
 	r := gin.Default()
 	r.LoadHTMLGlob("templates/**/*.html")
 	r.Static("/static", "./static")
 
+	    // Add CORS debug middleware only in development
+    if gin.Mode() == gin.DebugMode {
+        r.Use(handlers.CORSDebugMiddleware())
+        log.Println("🔍 CORS debugging enabled")
+    }
 	// CORS setup
 	corsConfig := cors.Config{
 		AllowOrigins: []string{
@@ -42,8 +52,7 @@ func main() {
 			"http://localhost:3001",
 			"http://127.0.0.1:3001",
 			"http://localhost:8081",
-			"http://localhost:8000",
-			"http://127.0.0.1:8000",
+			
 		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With", "X-CSRF-Token", "Cache-Control"},
@@ -51,15 +60,13 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}
-
-	// Development CORS handling
-	if gin.Mode() == gin.DebugMode {
-		corsConfig.AllowAllOrigins = true
-		corsConfig.AllowOrigins = nil
-		log.Println("🔍 CORS: Allowing all origins for development")
-	}
-
 	r.Use(cors.New(corsConfig))
+
+	// Add conditional null origin for development
+if gin.Mode() == gin.DebugMode {
+    corsConfig.AllowOrigins = append(corsConfig.AllowOrigins, "null")
+    log.Println("🔍 CORS: Allowing 'null' origin for development")
+}
 
 	// Iframe & security headers
 	r.Use(func(c *gin.Context) {
@@ -93,7 +100,7 @@ func main() {
 }
 
 func setupRoutes(r *gin.Engine) {
-	// Health check
+	// Health check (no rate limiting for monitoring)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":      "healthy",
@@ -106,7 +113,7 @@ func setupRoutes(r *gin.Engine) {
 		})
 	})
 
-	// CORS test endpoint
+	// CORS test endpoint (light rate limiting)
 	r.GET("/cors-test", handlers.RateLimitMiddleware("general"), func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "CORS is working!",
@@ -116,31 +123,31 @@ func setupRoutes(r *gin.Engine) {
 		})
 	})
 
-	// Embed endpoints with proper rate limiting
+	// ✅ UPDATED: Embed endpoints with proper rate limiting
 	embedGroup := r.Group("/embed/:projectId")
-	embedGroup.Use(handlers.RateLimitMiddleware("general"))
+	embedGroup.Use(handlers.RateLimitMiddleware("general")) // 60 req/min for embed pages
 	{
-		embedGroup.GET("", handlers.EmbedChat)
-		embedGroup.GET("/chat", handlers.IframeChatInterface)
+		embedGroup.GET("", handlers.EmbedChat)                    // Main embed page
+		embedGroup.GET("/chat", handlers.IframeChatInterface)     // Chat interface
 		
 		// Auth endpoints with stricter rate limiting
 		authGroup := embedGroup.Group("/auth")
-		authGroup.Use(handlers.RateLimitMiddleware("auth"))
+		authGroup.Use(handlers.RateLimitMiddleware("auth")) // 10 req/min for auth
 		{
-			authGroup.GET("", handlers.EmbedAuth)
-			authGroup.POST("", handlers.EmbedAuth)
+			authGroup.GET("", handlers.EmbedAuth)   // Show auth page
+			authGroup.POST("", handlers.EmbedAuth)  // Handle auth submission
 		}
 		
 		// Message endpoint with chat rate limiting
-		embedGroup.POST("/message", handlers.RateLimitMiddleware("chat"), handlers.IframeSendMessage)
+		embedGroup.POST("/message", handlers.RateLimitMiddleware("chat"), handlers.IframeSendMessage) // 30 req/min
 	}
 
-	// Embed health check
+	// ✅ NEW: Embed health check
 	r.GET("/embed/health", handlers.EmbedHealth)
 
-	// Public Auth Routes with rate limiting
+	// ✅ UPDATED: Public Auth Routes with rate limiting
 	authRoutes := r.Group("/")
-	authRoutes.Use(handlers.RateLimitMiddleware("auth"))
+	authRoutes.Use(handlers.RateLimitMiddleware("auth")) // 10 req/min for auth
 	{
 		authRoutes.POST("/login", handlers.Login)
 		authRoutes.GET("/logout", handlers.Logout)
@@ -148,9 +155,9 @@ func setupRoutes(r *gin.Engine) {
 		authRoutes.POST("/register", handlers.Register)
 	}
 
-	// API Routes with rate limiting
+	// ✅ UPDATED: API Routes with rate limiting
 	api := r.Group("/api")
-	api.Use(handlers.RateLimitMiddleware("general"))
+	api.Use(handlers.RateLimitMiddleware("general")) // 60 req/min for API
 	{
 		api.POST("/login", handlers.Login)
 		api.POST("/register", handlers.Register)
@@ -167,9 +174,9 @@ func setupRoutes(r *gin.Engine) {
 		api.GET("/admin/realtime-stats", handlers.GetRealtimeStats)
 	}
 
-	// Admin Routes with moderate rate limiting
+	// ✅ UPDATED: Admin Routes with moderate rate limiting
 	admin := r.Group("/admin")
-	admin.Use(handlers.RateLimitMiddleware("general"))
+	admin.Use(handlers.RateLimitMiddleware("general")) // 60 req/min for admin
 	admin.Use(func(c *gin.Context) {
 		if c.Request.Method == "OPTIONS" {
 			c.Next()
@@ -195,9 +202,9 @@ func setupRoutes(r *gin.Engine) {
 		admin.DELETE("/projects/:id/pdf/:fileId", handlers.DeletePDF)
 	}
 
-	// User Routes with rate limiting
+	// ✅ UPDATED: User Routes with rate limiting
 	user := r.Group("/user")
-	user.Use(handlers.RateLimitMiddleware("general"))
+	user.Use(handlers.RateLimitMiddleware("general")) // 60 req/min for user dashboard
 	user.Use(func(c *gin.Context) {
 		if c.Request.Method == "OPTIONS" {
 			c.Next()
@@ -209,22 +216,24 @@ func setupRoutes(r *gin.Engine) {
 		user.GET("/dashboard", handlers.UserDashboard)
 		user.GET("/project/:id", handlers.ProjectDashboard)
 		user.GET("/chat/:id", handlers.IframeChatInterface)
-		user.POST("/chat/:id/message", handlers.RateLimitMiddleware("chat"), handlers.SendMessage)
+		
+		// Chat message endpoint with stricter rate limiting
+		user.POST("/chat/:id/message", handlers.RateLimitMiddleware("chat"), handlers.SendMessage) // 30 req/min
+		
 		user.POST("/project/:id/upload", handlers.UploadPDF)
 		user.GET("/chat/:id/history", handlers.GetChatHistory)
 	}
 
-	// Chat API with proper rate limiting
+	// ✅ UPDATED: Chat API with proper rate limiting
 	chat := r.Group("/chat")
-	chat.Use(handlers.RateLimitMiddleware("chat"))
+	chat.Use(handlers.RateLimitMiddleware("chat")) // 30 req/min for chat
 	{
 		chat.POST("/:projectId/message", handlers.IframeSendMessage)
 		chat.GET("/:projectId/history", handlers.GetChatHistory)
-		chat.POST("/:projectId/rate/:messageId", handlers.RateMessage)
+		chat.POST("/:projectId/rate/:messageId", handlers.RateMessage) // Rate message endpoint
 	}
 
-
-	// 404 and method errors
+	// ✅ ENHANCED: 404 and method errors with rate limiting info
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error":   "Route not found",

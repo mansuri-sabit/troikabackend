@@ -294,7 +294,6 @@ func SendMessage(c *gin.Context) {
 
 // IframeSendMessage - For embed widget users with enhanced features
 func IframeSendMessage(c *gin.Context) {
-     log.Printf("📨 Message received from IP: %s", c.ClientIP())
     projectID := c.Param("projectId")
     startTime := time.Now() // Track response time
     clientIP := c.ClientIP()
@@ -341,12 +340,6 @@ func IframeSendMessage(c *gin.Context) {
             "remaining":   remaining,
             "status":      "rate_limited",
         })
-
-         c.JSON(http.StatusOK, gin.H{
-        "response": "Thank you for your message! Our AI is processing it.",
-        "status":   "success",
-    })
-
         return
     }
 
@@ -1073,5 +1066,3 @@ func CORSDebugMiddleware() gin.HandlerFunc {
         c.Next()
     }
 }
-
-

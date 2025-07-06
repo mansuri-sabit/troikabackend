@@ -23,6 +23,7 @@ func EmbedChat(c *gin.Context) {
 
 	userToken := c.Query("token")
 	if userToken == "" {
+		// No token, show pre-auth UI
 		c.HTML(http.StatusOK, "prechat.html", gin.H{
 			"project_id": projectID,
 			"api_url":    os.Getenv("APP_URL"),
@@ -30,12 +31,14 @@ func EmbedChat(c *gin.Context) {
 		return
 	}
 
+	// Validate project ID
 	objID, err := primitive.ObjectIDFromHex(projectID)
 	if err != nil {
 		c.HTML(http.StatusOK, "error.html", gin.H{"error": "Invalid project ID"})
 		return
 	}
 
+	// Fetch project from DB
 	projectCollection := config.DB.Collection("projects")
 	var project models.Project
 	err = projectCollection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
@@ -44,12 +47,14 @@ func EmbedChat(c *gin.Context) {
 		return
 	}
 
+	// Validate token
 	userID, err := validateUserToken(userToken)
 	if err != nil {
 		c.Redirect(http.StatusFound, fmt.Sprintf("/embed/%s", projectID))
 		return
 	}
 
+	// Fetch user
 	userCollection := config.DB.Collection("chat_users")
 	var user models.ChatUser
 	userObjID, _ := primitive.ObjectIDFromHex(userID)
@@ -59,6 +64,7 @@ func EmbedChat(c *gin.Context) {
 		return
 	}
 
+	// Render chat UI
 	c.HTML(http.StatusOK, "chat.html", gin.H{
 		"project":    project,
 		"project_id": projectID,
@@ -68,35 +74,10 @@ func EmbedChat(c *gin.Context) {
 	})
 }
 
-// Handle both GET and POST for /embed/:projectId/auth
+// POST /embed/:projectId/auth
 func EmbedAuth(c *gin.Context) {
 	projectID := c.Param("projectId")
 
-	// Handle GET request - show auth page
-	if c.Request.Method == "GET" {
-		objID, err := primitive.ObjectIDFromHex(projectID)
-		if err != nil {
-			c.HTML(http.StatusOK, "error.html", gin.H{"error": "Invalid project ID"})
-			return
-		}
-
-		collection := config.DB.Collection("projects")
-		var project models.Project
-		err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
-		if err != nil || !project.IsActive {
-			c.HTML(http.StatusOK, "error.html", gin.H{"error": "Project not found or inactive"})
-			return
-		}
-
-		c.HTML(http.StatusOK, "embed/auth.html", gin.H{
-			"project":    project,
-			"project_id": projectID,
-			"api_url":    os.Getenv("APP_URL"),
-		})
-		return
-	}
-
-	// Handle POST request - process authentication
 	var authData struct {
 		Mode     string `json:"mode"`
 		Name     string `json:"name"`
@@ -109,12 +90,12 @@ func EmbedAuth(c *gin.Context) {
 		return
 	}
 
+	// Validate project
 	objID, err := primitive.ObjectIDFromHex(projectID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid project"})
 		return
 	}
-
 	projectCollection := config.DB.Collection("projects")
 	var project models.Project
 	if err := projectCollection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project); err != nil {
@@ -125,6 +106,7 @@ func EmbedAuth(c *gin.Context) {
 	userCollection := config.DB.Collection("chat_users")
 
 	if authData.Mode == "register" {
+		// Check if user exists
 		var existingUser models.ChatUser
 		err := userCollection.FindOne(context.Background(), bson.M{
 			"project_id": projectID,
@@ -135,6 +117,7 @@ func EmbedAuth(c *gin.Context) {
 			return
 		}
 
+		// Create new user
 		user := models.ChatUser{
 			ProjectID: projectID,
 			Name:      authData.Name,
@@ -193,7 +176,7 @@ func EmbedAuth(c *gin.Context) {
 	})
 }
 
-// GET /embed/:projectId/chat - Chat interface
+// GET /embed/:projectId/chat - Health check or future UI
 func IframeChatInterface(c *gin.Context) {
     projectID := c.Param("projectId")
 
@@ -210,12 +193,14 @@ func IframeChatInterface(c *gin.Context) {
         return
     }
 
+    // ✅ Render the chat.html template
     c.HTML(http.StatusOK, "embed/chat.html", gin.H{
         "project":     project,
         "project_id":  project.ID.Hex(),
-        "api_url":     os.Getenv("APP_URL"),
+        "api_url":     os.Getenv("APP_URL"), // e.g. https://troikabackend.onrender.com
     })
 }
+
 
 // Simple health check
 func EmbedHealth(c *gin.Context) {
@@ -240,4 +225,38 @@ func generateUserToken(userID string) string {
 	bytes := make([]byte, 16)
 	rand.Read(bytes)
 	return fmt.Sprintf("%s_%s_%d", userID, hex.EncodeToString(bytes), time.Now().Unix())
+}
+
+// GET /embed/:projectId/auth - Show authentication page
+func ShowEmbedAuth(c *gin.Context) {
+    projectID := c.Param("projectId")
+    
+    // Validate project ID
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        c.HTML(http.StatusOK, "error.html", gin.H{"error": "Invalid project ID"})
+        return
+    }
+    
+    // Get project details
+    collection := config.DB.Collection("projects")
+    var project models.Project
+    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
+    if err != nil {
+        c.HTML(http.StatusOK, "error.html", gin.H{"error": "Project not found"})
+        return
+    }
+    
+    // Check if project is active
+    if !project.IsActive {
+        c.HTML(http.StatusOK, "error.html", gin.H{"error": "Project is inactive"})
+        return
+    }
+    
+    // Render authentication page
+    c.HTML(http.StatusOK, "embed/auth.html", gin.H{
+        "project":    project,
+        "project_id": projectID,
+        "api_url":    os.Getenv("APP_URL"),
+    })
 }
