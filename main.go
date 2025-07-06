@@ -43,21 +43,19 @@ func main() {
 	}
 
 	// CORS setup
-	corsConfig := cors.Config{
-		AllowOrigins: []string{
-			"https://troikafrontend.onrender.com",
-			"http://localhost:3000",
-			"http://127.0.0.1:3000",
-			"http://localhost:3001",
-			"http://127.0.0.1:3001",
-			"http://localhost:8081",
-		},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With", "X-CSRF-Token", "Cache-Control"},
-		ExposeHeaders:    []string{"Content-Length", "Content-Type", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
-	}
+corsConfig := cors.Config{
+    AllowOrigins: []string{
+        "https://troikafrontend.onrender.com",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    },
+    AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"},
+    AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With", "X-CSRF-Token", "Cache-Control"},
+    ExposeHeaders:    []string{"Content-Length", "Content-Type", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After"},
+    AllowCredentials: true,
+    MaxAge:           12 * time.Hour,
+}
+r.Use(cors.New(corsConfig))
 
 	// Add conditional CORS for development
 	if gin.Mode() == gin.DebugMode {
