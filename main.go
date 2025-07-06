@@ -16,15 +16,26 @@ import (
 
 func main() {
 	// Load .env variables
-	if err := godotenv.Load(); err != nil {
-		log.Println("Warning: .env file not found")
-	}
+    if err := godotenv.Load(); err != nil {
+        log.Println("Warning: .env file not found")
+    }
 
 
 
 	// Initialize MongoDB and Gemini
 	config.InitMongoDB()
 	config.InitGemini()
+
+
+	  // Add graceful shutdown
+    defer config.CloseMongoDB()
+
+
+	    // Your existing initialization code...
+    config.InitGemini()
+    handlers.InitRateLimiters()
+
+
 
 	// ✅ NEW: Initialize rate limiters
 	handlers.InitRateLimiters()
