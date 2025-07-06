@@ -7,7 +7,7 @@ import (
     "os"
     "strings"
     "time"
-    
+    "go.mongodb.org/mongo-driver/bson/primitive"
     "go.mongodb.org/mongo-driver/bson"
     "go.mongodb.org/mongo-driver/mongo"
     "go.mongodb.org/mongo-driver/mongo/options"
@@ -98,8 +98,6 @@ func hideSensitiveInfo(uri string) string {
     return uri
 }
 
-
-
 func verifyCollections(ctx context.Context) error {
     requiredCollections := []string{"projects", "chat_messages", "chat_users", "gemini_usage_logs"}
     
@@ -141,6 +139,10 @@ func setupIndexes(ctx context.Context) error {
             Keys: bson.D{{"is_active", 1}},
             Options: options.Index().SetBackground(true),
         },
+        {
+            Keys: bson.D{{"created_at", -1}},
+            Options: options.Index().SetBackground(true),
+        },
     })
     if err != nil {
         log.Printf("⚠️ Failed to create projects indexes: %v", err)
@@ -157,17 +159,52 @@ func setupIndexes(ctx context.Context) error {
             Keys: bson.D{{"timestamp", -1}},
             Options: options.Index().SetBackground(true),
         },
+        {
+            Keys: bson.D{{"project_id", 1}, {"timestamp", -1}},
+            Options: options.Index().SetBackground(true),
+        },
     })
     if err != nil {
         log.Printf("⚠️ Failed to create chat_messages indexes: %v", err)
+    }
+    
+    // Chat users collection indexes
+    usersCol := DB.Collection("chat_users")
+    _, err = usersCol.Indexes().CreateMany(ctx, []mongo.IndexModel{
+        {
+            Keys: bson.D{{"project_id", 1}, {"email", 1}},
+            Options: options.Index().SetBackground(true).SetUnique(true),
+        },
+        {
+            Keys: bson.D{{"created_at", -1}},
+            Options: options.Index().SetBackground(true),
+        },
+    })
+    if err != nil {
+        log.Printf("⚠️ Failed to create chat_users indexes: %v", err)
+    }
+    
+    // Gemini usage logs collection indexes
+    usageCol := DB.Collection("gemini_usage_logs")
+    _, err = usageCol.Indexes().CreateMany(ctx, []mongo.IndexModel{
+        {
+            Keys: bson.D{{"project_id", 1}, {"timestamp", -1}},
+            Options: options.Index().SetBackground(true),
+        },
+        {
+            Keys: bson.D{{"timestamp", -1}},
+            Options: options.Index().SetBackground(true),
+        },
+    })
+    if err != nil {
+        log.Printf("⚠️ Failed to create gemini_usage_logs indexes: %v", err)
     }
     
     log.Println("📈 Database indexes setup completed")
     return nil
 }
 
-
-
+// Enhanced collection access with validation
 func GetCollection(collectionName string) *mongo.Collection {
     if DB == nil {
         log.Fatal("❌ Database not initialized. Call InitMongoDB() first.")
@@ -197,7 +234,7 @@ func GetGeminiUsageLogsCollection() *mongo.Collection {
     return GetCollection("gemini_usage_logs")
 }
 
-
+// Health check and connection monitoring
 func HealthCheck() error {
     if DB == nil {
         return fmt.Errorf("database not initialized")
@@ -243,10 +280,15 @@ func GetDatabaseStats() map[string]interface{} {
         }
     }
     
+    // Add connection info
+    stats["database_name"] = DB.Name()
+    stats["connected"] = true
+    stats["timestamp"] = time.Now().Format(time.RFC3339)
+    
     return stats
 }
 
-
+// Graceful shutdown
 func CloseMongoDB() {
     if Client != nil {
         ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -258,4 +300,85 @@ func CloseMongoDB() {
             log.Println("✅ Disconnected from MongoDB successfully")
         }
     }
+}
+
+// Fix project limits for zero values
+func FixProjectLimits() error {
+    if DB == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    // Find projects with zero limits
+    filter := bson.M{
+        "$or": []bson.M{
+            {"gemini_daily_limit": 0},
+            {"gemini_monthly_limit": 0},
+            {"last_daily_reset": bson.M{"$lt": time.Now().AddDate(0, 0, -1)}},
+            {"last_monthly_reset": bson.M{"$lt": time.Now().AddDate(0, -1, 0)}},
+        },
+    }
+    
+    update := bson.M{
+        "$set": bson.M{
+            "gemini_daily_limit":   100,
+            "gemini_monthly_limit": 3000,
+            "last_daily_reset":     time.Now(),
+            "last_monthly_reset":   time.Now(),
+            "updated_at":          time.Now(),
+        },
+    }
+    
+    result, err := collection.UpdateMany(ctx, filter, update)
+    if err != nil {
+        return fmt.Errorf("failed to fix project limits: %v", err)
+    }
+    
+    log.Printf("✅ Fixed limits for %d projects", result.ModifiedCount)
+    return nil
+}
+
+// Initialize default project settings
+func InitializeProjectDefaults(projectID string) error {
+    if DB == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    update := bson.M{
+        "$setOnInsert": bson.M{
+            "gemini_daily_limit":   100,
+            "gemini_monthly_limit": 3000,
+            "gemini_usage_today":   0,
+            "gemini_usage_month":   0,
+            "last_daily_reset":     time.Now(),
+            "last_monthly_reset":   time.Now(),
+            "pdf_files":           []interface{}{},
+            "pdf_content":         "",
+            "welcome_message":     "Hello! How can I help you today?",
+            "created_at":          time.Now(),
+            "updated_at":          time.Now(),
+        },
+    }
+    
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        return fmt.Errorf("invalid project ID: %v", err)
+    }
+    
+    _, err = collection.UpdateOne(ctx, bson.M{"_id": objID}, update, options.Update().SetUpsert(true))
+    if err != nil {
+        return fmt.Errorf("failed to initialize project defaults: %v", err)
+    }
+    
+    log.Printf("✅ Initialized defaults for project: %s", projectID)
+    return nil
 }
