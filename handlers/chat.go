@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"regexp"
 )
 
 // ===== RATE LIMITING IMPLEMENTATION =====
@@ -586,6 +587,18 @@ func IframeSendMessage(c *gin.Context) {
 }
 
 // ===== AI RESPONSE GENERATION =====
+
+// Utility: Trim response to 3 sentences max
+func limitToSentences(text string, max int) string {
+	re := regexp.MustCompile(`[^.?!]+[.?!]`)
+	sentences := re.FindAllString(text, -1)
+	if len(sentences) <= max {
+		return strings.TrimSpace(text)
+	}
+	return strings.TrimSpace(strings.Join(sentences[:max], " "))
+}
+
+
 func generateAIResponse(userMessage, pdfContent, geminiKey, projectName, geminiModel string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -605,13 +618,11 @@ func generateAIResponse(userMessage, pdfContent, geminiKey, projectName, geminiM
 	model.SetTopP(0.9)
 	model.SetTopK(40)
 
-	// Add random tag to avoid repeated responses
 	uniqueTag := fmt.Sprintf("<!-- %d -->", time.Now().UnixNano()%1000)
 
-	// Well-structured professional prompt
 	prompt := fmt.Sprintf(`
 You are a professional AI assistant for %s. 
-You speak in a confident, clear, and natural tone — like a knowledgeable human expert. 
+You speak in a confident, clear, and natural tone — like a knowledgeable human expert.
 
 Your job is to answer user questions strictly based on the KNOWLEDGE BASE below, 
 but without explicitly mentioning the source or saying things like "the document says".
@@ -622,14 +633,14 @@ KNOWLEDGE BASE:
 USER QUESTION:
 %s
 
-GUIDELINES:
-– Speak directly to the user, like a helpful professional (not like a search engine)  
-– Keep the tone warm, polite, and confident  
-– Limit your response to 2–3 well-written sentences unless more is needed  
-– Never say "based on the document", "according to the file", or similar phrases  
-– Vary your sentence structure and word choice — avoid repeating any sentence or phrase  
-– If no answer is found, say so clearly and offer to help in another way  
-– End naturally, without saying "I hope this helps" or any unnecessary filler.
+STRICT GUIDELINES:
+– You MUST limit your answer to a MAXIMUM of 3 full sentences. Do NOT exceed this under any condition.  
+– NEVER include email addresses, phone numbers, or URLs in the answer unless user asks explicitly.  
+– Speak directly to the user, like a helpful expert.  
+– Do NOT say things like "according to the document" or "based on the file".  
+– If no answer is found, say so clearly and offer general guidance.  
+– Vary your tone and sentence structure — avoid repeating phrases.  
+– End naturally, without filler.
 
 %s
 Answer:`, projectName, pdfContent, userMessage, uniqueTag)
@@ -640,7 +651,9 @@ Answer:`, projectName, pdfContent, userMessage, uniqueTag)
 	}
 
 	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
-		return fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0]), nil
+		full := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
+		short := limitToSentences(full, 3)
+		return short, nil
 	}
 
 	return "I'm sorry, I couldn't generate a response at the moment. Please try again.", nil

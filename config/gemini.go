@@ -39,7 +39,7 @@ func GenerateResponse(userPrompt string, pdfContext string) (string, error) {
     noise := fmt.Sprintf("<!-- %d -->", time.Now().UnixNano()%1000)
 
     // Final prompt construction
-    fullPrompt := fmt.Sprintf(`
+fullPrompt := fmt.Sprintf(`
 You are a helpful and knowledgeable assistant.
 
 Here is some background information to help answer the user's question:
@@ -47,10 +47,13 @@ Here is some background information to help answer the user's question:
 
 Now, respond to the user's question naturally and professionally without referencing the background or its source.
 
+➡️ Limit your answer to 2–3 concise, informative sentences unless more is absolutely required.
+
 User question: %s
 
 %s
 `, pdfContext, userPrompt, noise)
+
 
     // Generate content using Gemini
     resp, err := model.GenerateContent(ctx, genai.Text(fullPrompt))
