@@ -42,7 +42,7 @@ func UploadPDF(c *gin.Context) {
         return
     }
 
-    log.Printf("✅ Project found: %s (Gemini enabled: %v)", project.Name, project.GeminiEnabled)
+    log.Printf("✅ Project found: %s", project.Name)
 
     // Handle multiple file upload
     form, err := c.MultipartForm()
@@ -52,8 +52,8 @@ func UploadPDF(c *gin.Context) {
         return
     }
 
-    // ✅ FIXED: Match React frontend field name
-    files := form.File["files"]  // Changed from "pdfs" to "files"
+    // ✅ CRITICAL FIX: Change from "pdfs" to "files" to match React frontend
+    files := form.File["files"]
     log.Printf("📄 Received %d files for processing", len(files))
     
     if len(files) == 0 {
@@ -68,8 +68,6 @@ func UploadPDF(c *gin.Context) {
 
     var uploadedFiles []models.PDFFile
     var allContent strings.Builder
-    var processedCount int
-    var errors []string
 
     // Create uploads directory if it doesn't exist
     uploadDir := "./static/uploads"
@@ -80,17 +78,15 @@ func UploadPDF(c *gin.Context) {
     }
 
     for i, file := range files {
-        log.Printf("📄 Processing file %d: %s (%d bytes)", i+1, file.Filename, file.Size)
+        log.Printf("📄 Processing file %d: %s", i+1, file.Filename)
         
         // Validate file type and size
         if !strings.HasSuffix(strings.ToLower(file.Filename), ".pdf") {
             log.Printf("⚠️ Skipping non-PDF file: %s", file.Filename)
-            errors = append(errors, fmt.Sprintf("File %s is not a PDF", file.Filename))
             continue
         }
         if file.Size > 10*1024*1024 { // 10MB limit
-            log.Printf("⚠️ Skipping oversized file: %s (%d bytes)", file.Filename, file.Size)
-            errors = append(errors, fmt.Sprintf("File %s exceeds 10MB limit", file.Filename))
+            log.Printf("⚠️ Skipping oversized file: %s", file.Filename)
             continue
         }
 
@@ -102,7 +98,6 @@ func UploadPDF(c *gin.Context) {
         // Save file
         if err := c.SaveUploadedFile(file, filePath); err != nil {
             log.Printf("❌ Failed to save file %s: %v", file.Filename, err)
-            errors = append(errors, fmt.Sprintf("Failed to save file %s", file.Filename))
             continue
         }
 
@@ -129,26 +124,20 @@ func UploadPDF(c *gin.Context) {
             } else {
                 log.Printf("❌ Gemini processing failed for %s: %v", file.Filename, err)
                 pdfFile.Status = "failed"
-                content = fmt.Sprintf("Failed to process PDF content: %v", err)
-                errors = append(errors, fmt.Sprintf("AI processing failed for %s", file.Filename))
+                content = "Failed to process PDF content"
             }
         } else {
-            log.Printf("⚠️ Gemini processing disabled for project: %s", project.Name)
             content = "PDF uploaded successfully (Gemini processing disabled)"
             pdfFile.Status = "completed"
         }
 
         uploadedFiles = append(uploadedFiles, pdfFile)
-        allContent.WriteString(fmt.Sprintf("=== CONTENT FROM %s ===\n%s\n\n", file.Filename, content))
-        processedCount++
+        allContent.WriteString(content + "\n\n")
     }
 
     if len(uploadedFiles) == 0 {
         log.Printf("❌ No files were successfully processed")
-        c.JSON(http.StatusBadRequest, gin.H{
-            "error": "No files could be processed",
-            "details": errors,
-        })
+        c.JSON(http.StatusBadRequest, gin.H{"error": "No files could be processed"})
         return
     }
 
@@ -163,27 +152,20 @@ func UploadPDF(c *gin.Context) {
 
     _, err = collection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
     if err != nil {
-        log.Printf("❌ Failed to update project in database: %v", err)
+        log.Printf("❌ Failed to update project: %v", err)
         c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update project"})
         return
     }
 
-    log.Printf("✅ Successfully processed %d files for project %s", processedCount, project.Name)
+    log.Printf("✅ Successfully processed %d files for project %s", len(uploadedFiles), project.Name)
 
-    response := gin.H{
-        "message":        fmt.Sprintf("Successfully processed %d PDF files", processedCount),
+    c.JSON(http.StatusOK, gin.H{
+        "message":        "PDFs uploaded and processed successfully",
         "files_uploaded": len(uploadedFiles),
         "files":          uploadedFiles,
-        "content_length": len(allContent.String()),
-    }
-
-    if len(errors) > 0 {
-        response["warnings"] = errors
-        response["partial_success"] = true
-    }
-
-    c.JSON(http.StatusOK, response)
+    })
 }
+
 
 
 // processPDFWithGemini - Enhanced PDF processing with Gemini AI
