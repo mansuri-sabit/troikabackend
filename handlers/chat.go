@@ -987,16 +987,14 @@ func RateLimitMiddleware(limiterType string) gin.HandlerFunc {
         
         clientIP := c.ClientIP()
         
-        // Your existing rate limiting logic...
-        var allowed bool
-        var remaining int
-        
         // Initialize rate limiters if not already done
         if chatRateLimiter == nil {
             InitRateLimiters()
         }
         
-        // Choose appropriate rate limiter based on type
+        var allowed bool
+        var remaining int
+        
         switch limiterType {
         case "chat":
             allowed = chatRateLimiter.Allow(clientIP)
@@ -1012,14 +1010,12 @@ func RateLimitMiddleware(limiterType string) gin.HandlerFunc {
             remaining = generalRateLimiter.GetRemainingRequests(clientIP)
         }
         
-        // Add rate limit headers to response
+        // Add rate limit headers
         c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
         c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
         
-        // Check if request is allowed
         if !allowed {
             c.Header("Retry-After", "60")
-            
             c.JSON(http.StatusTooManyRequests, gin.H{
                 "error":       "Rate limit exceeded",
                 "message":     "Too many requests. Please wait before trying again.",

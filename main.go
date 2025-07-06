@@ -228,9 +228,9 @@ func setupRoutes(r *gin.Engine) {
 	chat := r.Group("/chat")
 	chat.Use(handlers.RateLimitMiddleware("chat")) // 30 req/min for chat
 	{
-		chat.POST("/:projectId/message", handlers.IframeSendMessage)
-		chat.GET("/:projectId/history", handlers.GetChatHistory)
-		chat.POST("/:projectId/rate/:messageId", handlers.RateMessage) // Rate message endpoint
+		chat.POST("/:projectId/message", handlers.RateLimitMiddleware("chat"),handlers.IframeSendMessage)
+		chat.GET("/:projectId/history", handlers.RateLimitMiddleware("general"),handlers.GetChatHistory)
+		chat.POST("/:projectId/rate/:messageId", handlers.RateLimitMiddleware("general"),handlers.RateMessage) // Rate message endpoint
 	}
 
 	// ✅ ENHANCED: 404 and method errors with rate limiting info
