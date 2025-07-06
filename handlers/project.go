@@ -22,8 +22,13 @@ import (
 
 // UploadPDF - Enhanced PDF upload with multiple file support
 func UploadPDF(c *gin.Context) {
+    startTime := time.Now() // Add timing
     projectID := c.Param("id")
-    log.Printf("📄 Starting PDF upload for project: %s", projectID)
+    
+    // ✅ FIXED: Remove duplicate log
+    log.Printf("🔍 [DEBUG] Starting PDF upload for project: %s", projectID)
+    log.Printf("🔍 [DEBUG] Request method: %s", c.Request.Method)
+    log.Printf("🔍 [DEBUG] Content-Type: %s", c.Request.Header.Get("Content-Type"))
     
     objID, err := primitive.ObjectIDFromHex(projectID)
     if err != nil {
@@ -48,21 +53,31 @@ func UploadPDF(c *gin.Context) {
     form, err := c.MultipartForm()
     if err != nil {
         log.Printf("❌ Failed to parse multipart form: %v", err)
-        c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse form"})
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse form", "details": err.Error()})
         return
     }
 
-    // ✅ CRITICAL FIX: Change from "pdfs" to "files" to match React frontend
-    files := form.File["pdfs"]
+    // ✅ CRITICAL FIX: Use "files" to match React frontend
+    files := form.File["files"]
     log.Printf("📄 Received %d files for processing", len(files))
     
     if len(files) == 0 {
         log.Printf("❌ No files found in form data")
-        // Debug: Log all available form fields
+        
+        // ✅ ENHANCED: Better debug information
+        var availableFields []string
         for fieldName, fieldFiles := range form.File {
             log.Printf("Available form field: %s with %d files", fieldName, len(fieldFiles))
+            availableFields = append(availableFields, fieldName)
         }
-        c.JSON(http.StatusBadRequest, gin.H{"error": "No files uploaded"})
+        
+        c.JSON(http.StatusBadRequest, gin.H{
+            "error": "No files uploaded",
+            "debug_info": map[string]interface{}{
+                "available_fields": availableFields,
+                "expected_field":   "files",
+            },
+        })
         return
     }
 
@@ -78,7 +93,7 @@ func UploadPDF(c *gin.Context) {
     }
 
     for i, file := range files {
-        log.Printf("📄 Processing file %d: %s", i+1, file.Filename)
+        log.Printf("📄 Processing file %d/%d: %s", i+1, len(files), file.Filename)
         
         // Validate file type and size
         if !strings.HasSuffix(strings.ToLower(file.Filename), ".pdf") {
@@ -86,14 +101,14 @@ func UploadPDF(c *gin.Context) {
             continue
         }
         if file.Size > 10*1024*1024 { // 10MB limit
-            log.Printf("⚠️ Skipping oversized file: %s", file.Filename)
+            log.Printf("⚠️ Skipping oversized file: %s (size: %d bytes)", file.Filename, file.Size)
             continue
         }
 
-        // Generate unique filename
+        // ✅ ENHANCED: Safer filename generation
         fileID := primitive.NewObjectID().Hex()
-        fileName := fmt.Sprintf("%s_%s", fileID, file.Filename)
-        filePath := fmt.Sprintf("%s/%s", uploadDir, fileName)
+        fileName := fmt.Sprintf("%s_%s", fileID, filepath.Base(file.Filename))
+        filePath := filepath.Join(uploadDir, fileName)
 
         // Save file
         if err := c.SaveUploadedFile(file, filePath); err != nil {
@@ -157,12 +172,17 @@ func UploadPDF(c *gin.Context) {
         return
     }
 
-    log.Printf("✅ Successfully processed %d files for project %s", len(uploadedFiles), project.Name)
+    processingTime := time.Since(startTime)
+    log.Printf("✅ Successfully processed %d files for project %s in %v", len(uploadedFiles), project.Name, processingTime)
 
+    // ✅ ENHANCED: More detailed response
     c.JSON(http.StatusOK, gin.H{
-        "message":        "PDFs uploaded and processed successfully",
-        "files_uploaded": len(uploadedFiles),
-        "files":          uploadedFiles,
+        "message":          "PDFs uploaded and processed successfully",
+        "files_uploaded":   len(uploadedFiles),
+        "total_files":      len(files),
+        "skipped_files":    len(files) - len(uploadedFiles),
+        "files":           uploadedFiles,
+        "processing_time":  processingTime.Milliseconds(),
     })
 }
 
