@@ -57,7 +57,7 @@ func main() {
 	// CORS setup
 	corsConfig := cors.Config{
 		AllowOrigins: []string{
-			"https://troikafrontend.onrender.com",
+			"https://troika-tech.onrender.com",
 			"http://localhost:3000",
 			"http://127.0.0.1:3000",
 			"http://localhost:3001",
