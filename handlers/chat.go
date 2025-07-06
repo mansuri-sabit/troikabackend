@@ -195,7 +195,6 @@ func RateLimitMiddleware(limiterType string) gin.HandlerFunc {
 
 // ===== MAIN CHAT HANDLERS =====
 
-// SendMessage - For authenticated users in the main dashboard
 func SendMessage(c *gin.Context) {
 	projectID := c.Param("id")
 	clientIP := c.ClientIP()
@@ -587,7 +586,6 @@ func IframeSendMessage(c *gin.Context) {
 }
 
 // ===== AI RESPONSE GENERATION =====
-
 func generateAIResponse(userMessage, pdfContent, geminiKey, projectName, geminiModel string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -598,21 +596,24 @@ func generateAIResponse(userMessage, pdfContent, geminiKey, projectName, geminiM
 	}
 	defer client.Close()
 
-	modelName := geminiModel
-	if modelName == "" {
-		modelName = "gemini-1.5-flash"
+	if geminiModel == "" {
+		geminiModel = "gemini-1.5-flash"
 	}
 
-	model := client.GenerativeModel(modelName)
+	model := client.GenerativeModel(geminiModel)
 	model.SetTemperature(0.85)
 	model.SetTopP(0.9)
 	model.SetTopK(40)
 
-prompt := fmt.Sprintf(`
+	// Add random tag to avoid repeated responses
+	uniqueTag := fmt.Sprintf("<!-- %d -->", time.Now().UnixNano()%1000)
+
+	// Well-structured professional prompt
+	prompt := fmt.Sprintf(`
 You are a professional AI assistant for %s. 
 You speak in a confident, clear, and natural tone — like a knowledgeable human expert. 
 
-Your job is to answer user questions based strictly on the KNOWLEDGE BASE below, 
+Your job is to answer user questions strictly based on the KNOWLEDGE BASE below, 
 but without explicitly mentioning the source or saying things like "the document says".
 
 KNOWLEDGE BASE:
@@ -630,9 +631,8 @@ GUIDELINES:
 – If no answer is found, say so clearly and offer to help in another way  
 – End naturally, without saying "I hope this helps" or any unnecessary filler.
 
-Answer:
-`, projectName, pdfContent, userMessage)
-
+%s
+Answer:`, projectName, pdfContent, userMessage, uniqueTag)
 
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
@@ -645,6 +645,7 @@ Answer:
 
 	return "I'm sorry, I couldn't generate a response at the moment. Please try again.", nil
 }
+
 
 // Enhanced generateGeminiResponseWithTracking function
 func generateGeminiResponseWithTracking(project models.Project, userMessage, userIP string, user models.ChatUser) (string, int, int, error) {
