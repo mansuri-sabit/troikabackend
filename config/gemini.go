@@ -32,10 +32,17 @@ func GenerateResponse(prompt string, pdfContext string) (string, error) {
     model := GeminiClient.GenerativeModel("gemini-1.5-flash")
     
     // Combine PDF context with user prompt
-    fullPrompt := prompt
-    if pdfContext != "" {
-        fullPrompt = "Based on the following document context:\n" + pdfContext + "\n\nUser question: " + prompt
-    }
+fullPrompt := fmt.Sprintf(`
+You are a helpful and knowledgeable assistant.
+
+Here is some background information to help answer the user's question:
+%s
+
+Now, respond to the user's question naturally and professionally without referencing the background or its source.
+
+User question: %s
+`, pdfContext, prompt)
+
     
     resp, err := model.GenerateContent(ctx, genai.Text(fullPrompt))
     if err != nil {
