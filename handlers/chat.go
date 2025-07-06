@@ -640,6 +640,7 @@ Answer:`, projectName, pdfContent, userMessage)
     return "I'm sorry, I couldn't generate a response at the moment. Please try again.", nil
 }
 
+// Enhanced generateGeminiResponseWithTracking function
 func generateGeminiResponseWithTracking(project models.Project, userMessage, userIP string, user models.ChatUser) (string, int, int, error) {
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
@@ -656,34 +657,44 @@ func generateGeminiResponseWithTracking(project models.Project, userMessage, use
     }
     
     model := client.GenerativeModel(modelName)
-    model.SetTemperature(0.85)
+    model.SetTemperature(0.7) // Slightly lower for more focused responses
     model.SetTopP(0.9)
     model.SetTopK(40)
     
+    // Process PDF content for better AI understanding
+    processedPDFContent := ProcessPDFForAI(project.PDFContent)
+    
+    // Enhanced prompt with explicit instructions for PDF usage
     userContext := ""
     if user.Name != "" {
         userContext = fmt.Sprintf("The user's name is %s. ", user.Name)
     }
     
-    prompt := fmt.Sprintf(`
-You are a helpful AI assistant for %s. %sRespond naturally and conversationally without repeating phrases.
+    prompt := fmt.Sprintf(`You are an AI assistant for %s. %s
 
-KNOWLEDGE BASE:
+IMPORTANT INSTRUCTIONS:
+1. You MUST base your answers primarily on the provided document content below
+2. If the document contains relevant information, use it as your primary source
+3. Quote specific sections from the document when applicable
+4. If the document doesn't contain the answer, clearly state this and provide general guidance
+5. Always prioritize document content over general knowledge
+
+DOCUMENT CONTENT:
 %s
 
 USER QUESTION:
 %s
 
-GUIDELINES:
-– Base the answer on the knowledge-base content when possible  
-– Use a warm, friendly tone (avoid robotic phrases)  
-– Keep it short: 2-3 well-formed sentences unless detail is essential  
-– **Never** repeat any word, phrase, or sentence in the same reply  
-– Vary your wording and sentence structure  
-– If the docs don't contain the answer, say so politely and offer general help  
-– End the reply naturally without filler or repetition.
+RESPONSE GUIDELINES:
+- Start by checking if the document contains information relevant to the user's question
+- If found, provide a detailed answer based on the document content
+- Include specific quotes or references from the document when helpful
+- If the document doesn't contain the answer, say: "Based on the provided document, I don't have specific information about [topic]. However, I can provide general guidance..."
+- Keep responses conversational but informative
+- Use bullet points or numbered lists for complex information
+- End with an offer to help with related questions
 
-Answer:`, project.Name, userContext, project.PDFContent, userMessage)
+Answer:`, project.Name, userContext, processedPDFContent, userMessage)
 
     resp, err := model.GenerateContent(ctx, genai.Text(prompt))
     if err != nil {
@@ -701,6 +712,7 @@ Answer:`, project.Name, userContext, project.PDFContent, userMessage)
 
     return "", 0, 0, fmt.Errorf("no response generated")
 }
+
 
 // ===== UTILITY FUNCTIONS =====
 

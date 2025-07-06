@@ -8,7 +8,7 @@ import (
     "path/filepath"
     "strings"
     "time"
-    
+    "log"
     "github.com/gin-gonic/gin"
     "go.mongodb.org/mongo-driver/bson"
     "go.mongodb.org/mongo-driver/bson/primitive"
@@ -434,3 +434,107 @@ func formatFileSize(bytes int64) string {
     return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
+// Add this to your handlers/pdf.go or similar file
+func ProcessPDFForAI(pdfContent string) string {
+    // Clean and structure the PDF content for better AI understanding
+    lines := strings.Split(pdfContent, "\n")
+    var processedLines []string
+    
+    for _, line := range lines {
+        // Remove excessive whitespace
+        cleaned := strings.TrimSpace(line)
+        if cleaned != "" {
+            processedLines = append(processedLines, cleaned)
+        }
+    }
+    
+    // Join with proper spacing
+    structured := strings.Join(processedLines, "\n")
+    
+    // Add section markers for better AI understanding
+    structured = "=== DOCUMENT CONTENT START ===\n" + structured + "\n=== DOCUMENT CONTENT END ==="
+    
+    return structured
+}
+
+// Chunk large PDF content for better processing
+func ChunkPDFContent(content string, maxChunkSize int) []string {
+    if len(content) <= maxChunkSize {
+        return []string{content}
+    }
+    
+    var chunks []string
+    words := strings.Fields(content)
+    
+    var currentChunk []string
+    currentSize := 0
+    
+    for _, word := range words {
+        wordSize := len(word) + 1 // +1 for space
+        
+        if currentSize + wordSize > maxChunkSize && len(currentChunk) > 0 {
+            chunks = append(chunks, strings.Join(currentChunk, " "))
+            currentChunk = []string{word}
+            currentSize = wordSize
+        } else {
+            currentChunk = append(currentChunk, word)
+            currentSize += wordSize
+        }
+    }
+    
+    if len(currentChunk) > 0 {
+        chunks = append(chunks, strings.Join(currentChunk, " "))
+    }
+    
+    return chunks
+}
+
+
+// Add this function to validate and enhance PDF content
+func ValidateAndEnhancePDFContent(projectID primitive.ObjectID) error {
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    
+    collection := getProjectsCollection()
+    var project models.Project
+    
+    err := collection.FindOne(ctx, bson.M{"_id": projectID}).Decode(&project)
+    if err != nil {
+        return fmt.Errorf("project not found: %v", err)
+    }
+    
+    // Check if PDF content exists and is meaningful
+    if project.PDFContent == "" {
+        log.Printf("⚠️ Project %s has no PDF content", projectID.Hex())
+        return fmt.Errorf("no PDF content available")
+    }
+    
+    // Check content length
+    contentLength := len(project.PDFContent)
+    log.Printf("📄 PDF content length for project %s: %d characters", projectID.Hex(), contentLength)
+    
+    if contentLength < 100 {
+        log.Printf("⚠️ PDF content seems too short for project %s", projectID.Hex())
+        return fmt.Errorf("PDF content appears incomplete")
+    }
+    
+    // Enhance content if needed
+    if !strings.Contains(project.PDFContent, "===") {
+        enhancedContent := ProcessPDFForAI(project.PDFContent)
+        
+        // Update the project with enhanced content
+        _, err = collection.UpdateOne(ctx, bson.M{"_id": projectID}, bson.M{
+            "$set": bson.M{
+                "pdf_content": enhancedContent,
+                "updated_at": time.Now(),
+            },
+        })
+        if err != nil {
+            log.Printf("❌ Failed to update enhanced PDF content: %v", err)
+        } else {
+            log.Printf("✅ Enhanced PDF content for project %s", projectID.Hex())
+        }
+    }
+    
+    return nil
+}
