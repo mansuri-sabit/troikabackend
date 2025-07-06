@@ -233,7 +233,7 @@ func setupRoutes(r *gin.Engine) {
 		// Chat message endpoint with stricter rate limiting
 		user.POST("/chat/:id/message", handlers.RateLimitMiddleware("chat"), handlers.SendMessage) // 30 req/min
 		
-		user.POST("/project/:id/upload", handlers.UploadPDF)
+		
 		user.GET("/chat/:id/history", handlers.GetChatHistory)
 	}
 
