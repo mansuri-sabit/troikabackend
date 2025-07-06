@@ -95,7 +95,7 @@ func main() {
 	}
 
 	log.Printf("🚀 Jevi Chat Server running on port %s", port)
-	log.Printf("📊 Rate Limiting: Chat(30/min), Auth(10/min), General(60/min)")
+	log.Printf("📊 Rate Limiting: Chat(100/min), Auth(50/min), General(200/min)")
 	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, r))
 }
 
@@ -123,29 +123,7 @@ func setupRoutes(r *gin.Engine) {
 		})
 	})
 
-	// Embed endpoints with proper rate limiting
-	embedGroup := r.Group("/embed/:projectId")
-	embedGroup.Use(handlers.RateLimitMiddleware("general"))
-	{
-		embedGroup.GET("", handlers.EmbedChat)
-		embedGroup.GET("/chat", handlers.IframeChatInterface)
-		
-		// Auth endpoints with stricter rate limiting
-		authGroup := embedGroup.Group("/auth")
-		authGroup.Use(handlers.RateLimitMiddleware("auth"))
-		{
-			authGroup.GET("", handlers.EmbedAuth)
-			authGroup.POST("", handlers.EmbedAuth)
-		}
-		
-		// Message endpoint with chat rate limiting
-		embedGroup.POST("/message", handlers.RateLimitMiddleware("chat"), handlers.IframeSendMessage)
-	}
-
-	// Embed health check
-	r.GET("/embed/health", handlers.EmbedHealth)
-
-	// Public Auth Routes with rate limiting
+	// Public Auth Routes
 	authRoutes := r.Group("/")
 	authRoutes.Use(handlers.RateLimitMiddleware("auth"))
 	{
@@ -155,7 +133,7 @@ func setupRoutes(r *gin.Engine) {
 		authRoutes.POST("/register", handlers.Register)
 	}
 
-	// API Routes with rate limiting
+	// API Routes
 	api := r.Group("/api")
 	api.Use(handlers.RateLimitMiddleware("general"))
 	{
@@ -174,7 +152,7 @@ func setupRoutes(r *gin.Engine) {
 		api.GET("/admin/realtime-stats", handlers.GetRealtimeStats)
 	}
 
-	// Admin Routes with moderate rate limiting
+	// Admin Routes (protected)
 	admin := r.Group("/admin")
 	admin.Use(handlers.RateLimitMiddleware("general"))
 	admin.Use(func(c *gin.Context) {
@@ -204,7 +182,7 @@ func setupRoutes(r *gin.Engine) {
 		admin.DELETE("/projects/:id/pdf/:fileId", handlers.DeletePDF)
 	}
 
-	// User Routes with rate limiting
+	// User Routes (protected)
 	user := r.Group("/user")
 	user.Use(handlers.RateLimitMiddleware("general"))
 	user.Use(func(c *gin.Context) {
@@ -223,6 +201,28 @@ func setupRoutes(r *gin.Engine) {
 		user.GET("/chat/:id/history", handlers.GetChatHistory)
 	}
 
+	// Embed endpoints
+	embedGroup := r.Group("/embed/:projectId")
+	embedGroup.Use(handlers.RateLimitMiddleware("general"))
+	{
+		embedGroup.GET("", handlers.EmbedChat)
+		embedGroup.GET("/chat", handlers.IframeChatInterface)
+		
+		// Auth endpoints with stricter rate limiting
+		authGroup := embedGroup.Group("/auth")
+		authGroup.Use(handlers.RateLimitMiddleware("auth"))
+		{
+			authGroup.GET("", handlers.EmbedAuth)
+			authGroup.POST("", handlers.EmbedAuth)
+		}
+		
+		// Message endpoint with chat rate limiting
+		embedGroup.POST("/message", handlers.RateLimitMiddleware("chat"), handlers.IframeSendMessage)
+	}
+
+	// Embed health check
+	r.GET("/embed/health", handlers.EmbedHealth)
+
 	// Chat API with proper rate limiting
 	chat := r.Group("/chat")
 	chat.Use(handlers.RateLimitMiddleware("chat"))
@@ -231,8 +231,6 @@ func setupRoutes(r *gin.Engine) {
 		chat.GET("/:projectId/history", handlers.GetChatHistory)
 		chat.POST("/:projectId/rate/:messageId", handlers.RateMessage)
 	}
-
-
 
 	// 404 and method errors
 	r.NoRoute(func(c *gin.Context) {
