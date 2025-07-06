@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -20,7 +21,7 @@ func main() {
 		log.Println("Warning: .env file not found")
 	}
 
-	// ✅ FIXED: Initialize services once (removed duplicates)
+	// ✅ Initialize services once
 	log.Println("🔧 Initializing services...")
 	config.InitMongoDB()
 	config.InitGemini()
@@ -34,7 +35,7 @@ func main() {
 	// Set up Gin with enhanced configuration
 	r := gin.Default()
 	
-	// ✅ ENHANCED: File upload configuration for PDF handling
+	// ✅ File upload configuration for PDF handling
 	r.MaxMultipartMemory = 32 << 20 // 32 MB for PDF uploads
 	log.Println("📁 File upload limit set to 32MB")
 	
@@ -48,7 +49,7 @@ func main() {
 		log.Println("🔍 CORS debugging enabled for development")
 	}
 
-	// ✅ CLEAN: CORS setup without null origin handling
+	// ✅ CLEAN CORS setup (NO NULL ORIGIN)
 	corsConfig := cors.Config{
 		AllowOrigins: []string{
 			"https://troika-tech.onrender.com",
@@ -68,30 +69,12 @@ func main() {
 	r.Use(cors.New(corsConfig))
 	log.Println("🌐 CORS middleware configured successfully")
 
-	// Enhanced security headers for iframe support
+	// Enhanced security headers
 	r.Use(func(c *gin.Context) {
 		c.Header("X-Frame-Options", "ALLOWALL")
 		c.Header("Content-Security-Policy", "frame-ancestors *")
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
-		
-		// Add file upload specific headers
-		if c.Request.Method == "POST" && c.Request.Header.Get("Content-Type") != "" {
-			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With, X-CSRF-Token, Cache-Control")
-		}
-		
-		c.Next()
-	})
-
-	// ✅ ENHANCED: Add request timeout middleware for file uploads
-	r.Use(func(c *gin.Context) {
-		// Set longer timeout for file upload endpoints
-		if c.Request.URL.Path != "" && 
-		   (c.Request.URL.Path == "/admin/projects/*/upload-pdf" || 
-		    c.Request.Method == "POST" && c.Request.Header.Get("Content-Type") != "" && 
-		    c.Request.Header.Get("Content-Type") == "multipart/form-data") {
-			c.Request = c.Request.WithContext(c.Request.Context())
-		}
 		c.Next()
 	})
 
@@ -115,7 +98,7 @@ func main() {
 	// Server startup messages
 	log.Printf("🚀 Jevi Chat Server starting on port %s", port)
 	log.Printf("📊 Rate Limiting: Chat(30/min), Auth(10/min), General(60/min)")
-	log.Printf("📁 File Upload: Max 32MB, Enhanced timeout handling")
+	log.Printf("📁 File Upload: Max 32MB, No authentication required")
 	log.Printf("🌐 CORS: Enabled with %d allowed origins", len(corsConfig.AllowOrigins))
 	log.Printf("🔒 Security: Enhanced headers for iframe support")
 	
@@ -123,9 +106,9 @@ func main() {
 	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, r))
 }
 
-// ✅ ENHANCED: Complete route setup with improved error handling and debugging
+// ✅ Complete route setup with PUBLIC PDF upload
 func setupRoutes(r *gin.Engine) {
-	// Health check endpoint (no rate limiting for monitoring)
+	// Health check endpoint
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":        "healthy",
@@ -135,6 +118,7 @@ func setupRoutes(r *gin.Engine) {
 			"iframe":        "enabled",
 			"rate_limit":    "enabled",
 			"file_upload":   "32MB max",
+			"pdf_upload":    "public (no auth)",
 			"timestamp":     time.Now().Format(time.RFC3339),
 			"environment":   gin.Mode(),
 		})
@@ -148,6 +132,26 @@ func setupRoutes(r *gin.Engine) {
 			"method":  c.Request.Method,
 			"iframe":  "supported",
 		})
+	})
+
+	// ✅ PUBLIC PDF UPLOAD (NO AUTHENTICATION REQUIRED)
+	r.POST("/public/projects/:id/upload-pdf", func(c *gin.Context) {
+		projectId := c.Param("id")
+		log.Printf("📄 Public PDF upload for project: %s", projectId)
+		log.Printf("📄 Request method: %s", c.Request.Method)
+		log.Printf("📄 Content-Type: %s", c.Request.Header.Get("Content-Type"))
+		log.Printf("📄 Content-Length: %d bytes", c.Request.ContentLength)
+		log.Printf("📄 Origin: %s", c.Request.Header.Get("Origin"))
+		
+		// Basic validation
+		if projectId == "" {
+			log.Printf("❌ Missing project ID")
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Project ID required"})
+			return
+		}
+		
+		// Direct call to upload handler (no auth middleware)
+		handlers.UploadPDF(c)
 	})
 
 	// ✅ EMBED ROUTES: Chat widget embedding
@@ -172,7 +176,7 @@ func setupRoutes(r *gin.Engine) {
 	// Embed health check
 	r.GET("/embed/health", handlers.EmbedHealth)
 
-	// ✅ PUBLIC AUTH ROUTES: Login, register, logout
+	// ✅ PUBLIC AUTH ROUTES
 	authRoutes := r.Group("/")
 	authRoutes.Use(handlers.RateLimitMiddleware("auth"))
 	{
@@ -182,7 +186,7 @@ func setupRoutes(r *gin.Engine) {
 		authRoutes.POST("/register", handlers.Register)
 	}
 
-	// ✅ API ROUTES: General API endpoints
+	// ✅ API ROUTES
 	api := r.Group("/api")
 	api.Use(handlers.RateLimitMiddleware("general"))
 	{
@@ -201,14 +205,12 @@ func setupRoutes(r *gin.Engine) {
 		api.GET("/admin/realtime-stats", handlers.GetRealtimeStats)
 	}
 
-	// ✅ ENHANCED: Admin Routes with detailed debugging for PDF upload
+	// ✅ ADMIN ROUTES (WITH AUTHENTICATION) - PDF upload को छोड़कर
 	admin := r.Group("/admin")
 	admin.Use(handlers.RateLimitMiddleware("general"))
 	admin.Use(func(c *gin.Context) {
-		// Enhanced logging for debugging upload issues
+		// Enhanced logging for debugging
 		log.Printf("🔍 Admin route accessed: %s %s", c.Request.Method, c.Request.URL.Path)
-		log.Printf("🔍 Content-Type: %s", c.Request.Header.Get("Content-Type"))
-		log.Printf("🔍 Content-Length: %d", c.Request.ContentLength)
 		log.Printf("🔍 Authorization header present: %t", c.GetHeader("Authorization") != "")
 		
 		if c.Request.Method == "OPTIONS" {
@@ -237,25 +239,12 @@ func setupRoutes(r *gin.Engine) {
 		admin.POST("/projects/:id/gemini/reset", handlers.ResetGeminiUsage)
 		admin.GET("/projects/:id/gemini/analytics", handlers.GetGeminiAnalytics)
 		
-		// ✅ CRITICAL: PDF upload endpoint with enhanced debugging
-		admin.POST("/projects/:id/upload-pdf", func(c *gin.Context) {
-			projectId := c.Param("id")
-			log.Printf("📄 PDF upload endpoint hit for project: %s", projectId)
-			log.Printf("📄 Request method: %s", c.Request.Method)
-			log.Printf("📄 Content-Type: %s", c.Request.Header.Get("Content-Type"))
-			log.Printf("📄 Content-Length: %d bytes", c.Request.ContentLength)
-			log.Printf("📄 User-Agent: %s", c.Request.Header.Get("User-Agent"))
-			
-			// Call the actual upload handler
-			handlers.UploadPDF(c)
-		})
-		
-		// PDF management endpoints
+		// PDF management endpoints (with auth)
 		admin.DELETE("/projects/:id/pdf/:fileId", handlers.DeletePDF)
 		admin.GET("/projects/:id/pdfs", handlers.GetPDFFiles)
 	}
 
-	// ✅ USER ROUTES: User dashboard and project management
+	// ✅ USER ROUTES
 	user := r.Group("/user")
 	user.Use(handlers.RateLimitMiddleware("general"))
 	user.Use(func(c *gin.Context) {
@@ -269,13 +258,11 @@ func setupRoutes(r *gin.Engine) {
 		user.GET("/dashboard", handlers.UserDashboard)
 		user.GET("/project/:id", handlers.ProjectDashboard)
 		user.GET("/chat/:id", handlers.IframeChatInterface)
-		
-		// Chat message endpoint with stricter rate limiting
 		user.POST("/chat/:id/message", handlers.RateLimitMiddleware("chat"), handlers.SendMessage)
 		user.GET("/chat/:id/history", handlers.GetChatHistory)
 	}
 
-	// ✅ CHAT API: Public chat endpoints for embedded widgets
+	// ✅ CHAT API
 	chat := r.Group("/chat")
 	chat.Use(handlers.RateLimitMiddleware("chat"))
 	{
@@ -284,7 +271,7 @@ func setupRoutes(r *gin.Engine) {
 		chat.POST("/:projectId/rate/:messageId", handlers.RateLimitMiddleware("general"), handlers.RateMessage)
 	}
 
-	// ✅ ENHANCED: Error handling with detailed debugging information
+	// ✅ ERROR HANDLING
 	r.NoRoute(func(c *gin.Context) {
 		log.Printf("❌ 404 - Route not found: %s %s", c.Request.Method, c.Request.URL.Path)
 		c.JSON(http.StatusNotFound, gin.H{
