@@ -48,7 +48,7 @@ func main() {
 		log.Println("🔍 CORS debugging enabled for development")
 	}
 
-	// ✅ FIXED: CORS setup with proper null origin handling
+	// ✅ CLEAN: CORS setup without null origin handling
 	corsConfig := cors.Config{
 		AllowOrigins: []string{
 			"https://troika-tech.onrender.com",
@@ -64,15 +64,9 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}
-
-	// ✅ FIXED: Add null origin before applying CORS middleware
-	if gin.Mode() == gin.DebugMode {
-		corsConfig.AllowOrigins = append(corsConfig.AllowOrigins, "null")
-		log.Println("🔍 CORS: Allowing 'null' origin for development")
-	}
 	
 	r.Use(cors.New(corsConfig))
-	log.Println("🌐 CORS middleware configured")
+	log.Println("🌐 CORS middleware configured successfully")
 
 	// Enhanced security headers for iframe support
 	r.Use(func(c *gin.Context) {
@@ -153,7 +147,6 @@ func setupRoutes(r *gin.Engine) {
 			"origin":  c.Request.Header.Get("Origin"),
 			"method":  c.Request.Method,
 			"iframe":  "supported",
-			"headers": c.Request.Header,
 		})
 	})
 
