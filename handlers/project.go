@@ -23,8 +23,11 @@ import (
 // UploadPDF - Enhanced PDF upload with multiple file support
 func UploadPDF(c *gin.Context) {
     projectID := c.Param("id")
+    log.Printf("📄 Starting PDF upload for project: %s", projectID)
+    
     objID, err := primitive.ObjectIDFromHex(projectID)
     if err != nil {
+        log.Printf("❌ Invalid project ID: %s", projectID)
         c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
         return
     }
@@ -34,47 +37,76 @@ func UploadPDF(c *gin.Context) {
     var project models.Project
     err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
     if err != nil {
+        log.Printf("❌ Project not found: %s", projectID)
         c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
         return
     }
 
+    log.Printf("✅ Project found: %s (Gemini enabled: %v)", project.Name, project.GeminiEnabled)
+
     // Handle multiple file upload
     form, err := c.MultipartForm()
     if err != nil {
+        log.Printf("❌ Failed to parse multipart form: %v", err)
         c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to parse form"})
         return
     }
 
-    files := form.File["pdfs"]
+    // ✅ FIXED: Match React frontend field name
+    files := form.File["files"]  // Changed from "pdfs" to "files"
+    log.Printf("📄 Received %d files for processing", len(files))
+    
     if len(files) == 0 {
+        log.Printf("❌ No files found in form data")
+        // Debug: Log all available form fields
+        for fieldName, fieldFiles := range form.File {
+            log.Printf("Available form field: %s with %d files", fieldName, len(fieldFiles))
+        }
         c.JSON(http.StatusBadRequest, gin.H{"error": "No files uploaded"})
         return
     }
 
     var uploadedFiles []models.PDFFile
     var allContent strings.Builder
+    var processedCount int
+    var errors []string
 
     // Create uploads directory if it doesn't exist
-    os.MkdirAll("./static/uploads", 0755)
+    uploadDir := "./static/uploads"
+    if err := os.MkdirAll(uploadDir, 0755); err != nil {
+        log.Printf("❌ Failed to create upload directory: %v", err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create upload directory"})
+        return
+    }
 
-    for _, file := range files {
+    for i, file := range files {
+        log.Printf("📄 Processing file %d: %s (%d bytes)", i+1, file.Filename, file.Size)
+        
         // Validate file type and size
         if !strings.HasSuffix(strings.ToLower(file.Filename), ".pdf") {
+            log.Printf("⚠️ Skipping non-PDF file: %s", file.Filename)
+            errors = append(errors, fmt.Sprintf("File %s is not a PDF", file.Filename))
             continue
         }
         if file.Size > 10*1024*1024 { // 10MB limit
+            log.Printf("⚠️ Skipping oversized file: %s (%d bytes)", file.Filename, file.Size)
+            errors = append(errors, fmt.Sprintf("File %s exceeds 10MB limit", file.Filename))
             continue
         }
 
         // Generate unique filename
         fileID := primitive.NewObjectID().Hex()
         fileName := fmt.Sprintf("%s_%s", fileID, file.Filename)
-        filePath := fmt.Sprintf("./static/uploads/%s", fileName)
+        filePath := fmt.Sprintf("%s/%s", uploadDir, fileName)
 
         // Save file
         if err := c.SaveUploadedFile(file, filePath); err != nil {
+            log.Printf("❌ Failed to save file %s: %v", file.Filename, err)
+            errors = append(errors, fmt.Sprintf("Failed to save file %s", file.Filename))
             continue
         }
+
+        log.Printf("✅ File saved: %s", filePath)
 
         pdfFile := models.PDFFile{
             ID:         fileID,
@@ -88,21 +120,36 @@ func UploadPDF(c *gin.Context) {
         // Process with Gemini if enabled
         var content string
         if project.GeminiEnabled && project.GeminiAPIKey != "" {
+            log.Printf("🤖 Processing PDF with Gemini: %s", file.Filename)
             content, err = processPDFWithGemini(filePath, project.GeminiAPIKey)
             if err == nil {
                 pdfFile.ProcessedAt = time.Now()
                 pdfFile.Status = "completed"
+                log.Printf("✅ Gemini processing completed for: %s", file.Filename)
             } else {
+                log.Printf("❌ Gemini processing failed for %s: %v", file.Filename, err)
                 pdfFile.Status = "failed"
-                content = "Failed to process PDF content"
+                content = fmt.Sprintf("Failed to process PDF content: %v", err)
+                errors = append(errors, fmt.Sprintf("AI processing failed for %s", file.Filename))
             }
         } else {
+            log.Printf("⚠️ Gemini processing disabled for project: %s", project.Name)
             content = "PDF uploaded successfully (Gemini processing disabled)"
             pdfFile.Status = "completed"
         }
 
         uploadedFiles = append(uploadedFiles, pdfFile)
-        allContent.WriteString(content + "\n\n")
+        allContent.WriteString(fmt.Sprintf("=== CONTENT FROM %s ===\n%s\n\n", file.Filename, content))
+        processedCount++
+    }
+
+    if len(uploadedFiles) == 0 {
+        log.Printf("❌ No files were successfully processed")
+        c.JSON(http.StatusBadRequest, gin.H{
+            "error": "No files could be processed",
+            "details": errors,
+        })
+        return
     }
 
     // Update project with PDF files and content
@@ -116,16 +163,28 @@ func UploadPDF(c *gin.Context) {
 
     _, err = collection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
     if err != nil {
+        log.Printf("❌ Failed to update project in database: %v", err)
         c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update project"})
         return
     }
 
-    c.JSON(http.StatusOK, gin.H{
-        "message":        "PDFs uploaded and processed successfully",
+    log.Printf("✅ Successfully processed %d files for project %s", processedCount, project.Name)
+
+    response := gin.H{
+        "message":        fmt.Sprintf("Successfully processed %d PDF files", processedCount),
         "files_uploaded": len(uploadedFiles),
         "files":          uploadedFiles,
-    })
+        "content_length": len(allContent.String()),
+    }
+
+    if len(errors) > 0 {
+        response["warnings"] = errors
+        response["partial_success"] = true
+    }
+
+    c.JSON(http.StatusOK, response)
 }
+
 
 // processPDFWithGemini - Enhanced PDF processing with Gemini AI
 func processPDFWithGemini(filePath, apiKey string) (string, error) {

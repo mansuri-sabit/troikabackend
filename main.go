@@ -202,6 +202,7 @@ func setupRoutes(r *gin.Engine) {
 		admin.POST("/projects", handlers.CreateProject)
 		admin.GET("/projects/:id", handlers.ProjectDetails)
 		admin.PUT("/projects/:id", handlers.UpdateProject)
+		
 		admin.DELETE("/projects/:id", handlers.DeleteProject)
 		admin.GET("/users", handlers.AdminUsers)
 		admin.DELETE("/users/:id", handlers.DeleteUser)
@@ -210,6 +211,7 @@ func setupRoutes(r *gin.Engine) {
 		admin.POST("/projects/:id/gemini/reset", handlers.ResetGeminiUsage)
 		admin.GET("/projects/:id/gemini/analytics", handlers.GetGeminiAnalytics)
 		admin.POST("/projects/:id/upload-pdf", handlers.UploadPDF)
+		
 		admin.DELETE("/projects/:id/pdf/:fileId", handlers.DeletePDF)
 	}
 
