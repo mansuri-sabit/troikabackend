@@ -53,7 +53,7 @@ func UploadPDF(c *gin.Context) {
     }
 
     // ✅ CRITICAL FIX: Change from "pdfs" to "files" to match React frontend
-    files := form.File["files"]
+    files := form.File["pdfs"]
     log.Printf("📄 Received %d files for processing", len(files))
     
     if len(files) == 0 {
