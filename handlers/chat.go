@@ -620,28 +620,14 @@ func generateAIResponse(userMessage, pdfContent, geminiKey, projectName, geminiM
 
 	uniqueTag := fmt.Sprintf("<!-- %d -->", time.Now().UnixNano()%1000)
 
-	prompt := fmt.Sprintf(`
-You are a professional AI assistant for %s. 
-You speak in a confident, clear, and natural tone — like a knowledgeable human expert.
+    prompt := fmt.Sprintf(`
+Answer as a helpful, respectful assistant for %s. Use only the knowledge below, reply in 1–2 clear, human-like sentences — no mention of sources.
 
-Your job is to answer user questions strictly based on the KNOWLEDGE BASE below, 
-but without explicitly mentioning the source or saying things like "the document says".
-
-KNOWLEDGE BASE:
+KNOWLEDGE:
 %s
 
-USER QUESTION:
+QUESTION:
 %s
-
-STRICT GUIDELINES:
-– You MUST limit your answer to a MAXIMUM of 3 full sentences. Do NOT exceed this under any condition.  
-– NEVER include email addresses, phone numbers, or URLs in the answer unless user asks explicitly.  
-– Speak directly to the user, like a helpful expert.  
-– Do NOT say things like "according to the document" or "based on the file".  
-– If no answer is found, say so clearly and offer general guidance.  
-– Vary your tone and sentence structure — avoid repeating phrases.  
-– End naturally, without filler.
-➡️ Limit your answer to 2–3 concise, informative sentences unless more is absolutely required.
 
 %s
 Answer:`, projectName, pdfContent, userMessage, uniqueTag)

@@ -40,19 +40,19 @@ func GenerateResponse(userPrompt string, pdfContext string) (string, error) {
 
     // Final prompt construction
 fullPrompt := fmt.Sprintf(`
-You are a helpful and knowledgeable assistant.
+You're a friendly and respectful assistant — reply like a smart friend would, not like a robot.
 
-Here is some background information to help answer the user's question:
+Give a short, helpful answer (1–2 lines max). Don’t mention context, background, or any documents.
+
+Speak naturally, be polite, and don’t use robotic phrases.
+
+Question: %s
+
+Context: %s
+
 %s
+`, userPrompt, pdfContext, noise)
 
-Now, respond to the user's question naturally and professionally without referencing the background or its source.
-
-➡️ Limit your answer to 2–3 concise, informative sentences unless more is absolutely required.
-
-User question: %s
-
-%s
-`, pdfContext, userPrompt, noise)
 
 
     // Generate content using Gemini
@@ -73,18 +73,24 @@ User question: %s
     return "No response generated", nil
 }
 
-// Optional: clean common robotic phrases
 func cleanResponse(raw string) string {
     cleaned := raw
 
-    // Remove robotic starter phrases
-    cleaned = removeFirstMatch(cleaned, `(?i)based on the .*?(document|pdf)[,:]?`)
-
-    // Remove generic bot endings
+    // Remove robotic or formal phrases
+    cleaned = removeFirstMatch(cleaned, `(?i)^based on the .*?(document|pdf)[,:]?\s*`)
+    cleaned = removeFirstMatch(cleaned, `(?i)^according to .*?[,:]?\s*`)
+    cleaned = removeFirstMatch(cleaned, `(?i)^as per .*?[,:]?\s*`)
     cleaned = removeFirstMatch(cleaned, `(?i)is there anything else.*?\?$`)
+    cleaned = removeFirstMatch(cleaned, `(?i)let me know if you need anything else.*?`)
+    cleaned = removeFirstMatch(cleaned, `(?i)hope this helps[.!]?`)
+    cleaned = removeFirstMatch(cleaned, `(?i)I'm here to assist you.*?`)
+
+    // Optional: trim spaces
+    cleaned = regexp.MustCompile(`^\s+|\s+$`).ReplaceAllString(cleaned, "")
 
     return cleaned
 }
+
 
 // Helper: simple regex match remover
 func removeFirstMatch(input string, pattern string) string {
