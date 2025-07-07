@@ -242,7 +242,9 @@ func processPDFWithGemini(filePath, apiKey string) (string, error) {
         
         Format the content clearly with headings and bullet points where appropriate. 
         This will be used as a knowledge base for answering user questions.
-        Make sure to preserve the logical structure and hierarchy of information.`),
+        Make sure to preserve the logical structure and hierarchy of information.
+        ➡️ Limit your answer to 2–3 concise, informative sentences unless more is absolutely required.
+        `),
     )
     
     if err != nil {

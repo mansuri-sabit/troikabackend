@@ -714,6 +714,8 @@ RESPONSE GUIDELINES:
 - Keep responses conversational but informative
 - Use bullet points or numbered lists for complex information
 - End with an offer to help with related questions
+➡️ Limit your answer to 2–3 concise, informative sentences unless more is absolutely required.
+
 
 Answer:`, project.Name, userContext, processedPDFContent, userMessage)
 
