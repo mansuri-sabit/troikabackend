@@ -641,6 +641,7 @@ STRICT GUIDELINES:
 – If no answer is found, say so clearly and offer general guidance.  
 – Vary your tone and sentence structure — avoid repeating phrases.  
 – End naturally, without filler.
+➡️ Limit your answer to 2–3 concise, informative sentences unless more is absolutely required.
 
 %s
 Answer:`, projectName, pdfContent, userMessage, uniqueTag)
