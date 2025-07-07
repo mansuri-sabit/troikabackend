@@ -825,19 +825,12 @@ func GetGeminiAnalytics(c *gin.Context) {
     })
 }
 
-// Add usage tracking helper function
 func trackGeminiUsage(projectID primitive.ObjectID, question, response, model string, 
                      inputTokens, outputTokens int, responseTime int64, userIP string, success bool) {
-    
-    // Calculate cost (simplified pricing)
-    var costPer1K float64 = 0.000075 // Gemini Flash pricing
-    if model == "gemini-1.5-pro" {
-        costPer1K = 0.00125
-    }
-    
-    totalTokens := inputTokens + outputTokens
-    estimatedCost := (float64(totalTokens) / 1000.0) * costPer1K
-    
+
+    // Use accurate token-based cost
+    estimatedCost := calculateGeminiCost(model, inputTokens, outputTokens)
+
     // Save usage log
     usageLog := models.GeminiUsageLog{
         ProjectID:     projectID,
@@ -852,23 +845,23 @@ func trackGeminiUsage(projectID primitive.ObjectID, question, response, model st
         Timestamp:     time.Now(),
         Success:       success,
     }
-    
+
     logCollection := config.DB.Collection("gemini_usage_logs")
     logCollection.InsertOne(context.Background(), usageLog)
-    
+
     // Update project counters if successful
     if success {
         projectCollection := config.DB.Collection("projects")
         update := bson.M{
             "$inc": bson.M{
-                "gemini_usage_today": 1,
-                "gemini_usage_month": 1,
-                "total_questions": 1,
-                "estimated_cost_today": estimatedCost,
-                "estimated_cost_month": estimatedCost,
+                "gemini_usage_today":     1,
+                "gemini_usage_month":     1,
+                "total_questions":        1,
+                "estimated_cost_today":   estimatedCost,
+                "estimated_cost_month":   estimatedCost,
             },
             "$set": bson.M{
-                "last_used": time.Now(),
+                "last_used":  time.Now(),
                 "updated_at": time.Now(),
             },
         }

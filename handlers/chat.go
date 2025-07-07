@@ -877,13 +877,13 @@ func calculateGeminiCost(model string, inputTokens, outputTokens int) float64 {
 	switch model {
 	case "gemini-1.5-flash":
 		inputCostPer1K = 0.000075
-		outputCostPer1K = 0.0003
+		outputCostPer1K = 0.00015
 	case "gemini-1.5-pro":
 		inputCostPer1K = 0.00125
-		outputCostPer1K = 0.005
+		outputCostPer1K = 0.0025
 	default:
 		inputCostPer1K = 0.000075
-		outputCostPer1K = 0.0003
+		outputCostPer1K = 0.00015
 	}
 
 	inputCost := (float64(inputTokens) / 1000.0) * inputCostPer1K
@@ -891,6 +891,7 @@ func calculateGeminiCost(model string, inputTokens, outputTokens int) float64 {
 
 	return math.Round((inputCost+outputCost)*100000) / 100000
 }
+
 
 func getNextDailyReset() string {
 	tomorrow := time.Now().AddDate(0, 0, 1).Truncate(24 * time.Hour)
