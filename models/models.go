@@ -30,6 +30,28 @@ type ChatUser struct {
     IsActive  bool               `bson:"is_active" json:"is_active"`
 }
 
+// Notification represents system notifications
+type Notification struct {
+    ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+    ProjectID primitive.ObjectID `bson:"project_id" json:"project_id"`
+    Type      string             `bson:"type" json:"type"` // "monthly_limit", "usage_warning", "test"
+    Message   string             `bson:"message" json:"message"`
+    SentAt    time.Time          `bson:"sent_at" json:"sent_at"`
+    Status    string             `bson:"status" json:"status"` // "sent", "failed"
+    ReadAt    time.Time          `bson:"read_at,omitempty" json:"read_at,omitempty"`
+}
+
+// Notification type constants
+const (
+    NotificationMonthlyLimit = "monthly_limit"
+    NotificationUsageWarning = "usage_warning"
+    NotificationTest         = "test"
+    NotificationExpired      = "expired"
+)
+
+
+
+
 // Project represents a chatbot project
 type Project struct {
     ID              primitive.ObjectID `bson:"_id,omitempty" json:"id"`

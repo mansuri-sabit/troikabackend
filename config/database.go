@@ -692,3 +692,222 @@ func GetHighUsageProjects() ([]primitive.ObjectID, error) {
     
     return highUsageProjects, nil
 }
+
+// ✅ NEW: Validate subscription schema
+func ValidateSubscriptionSchema() error {
+    if DB == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    // Check for projects missing required subscription fields
+    requiredFields := []string{"status", "expiry_date", "total_tokens_used", "monthly_token_limit"}
+    
+    for _, field := range requiredFields {
+        filter := bson.M{field: bson.M{"$exists": false}}
+        count, err := collection.CountDocuments(ctx, filter)
+        if err != nil {
+            return fmt.Errorf("failed to validate field %s: %v", field, err)
+        }
+        
+        if count > 0 {
+            log.Printf("⚠️ Found %d projects missing field: %s", count, field)
+        }
+    }
+    
+    return nil
+}
+
+// ✅ NEW: Initialize token limits for existing projects
+func InitializeTokenLimits() error {
+    collection := GetProjectsCollection()
+    
+    // Set default token limits for projects without them
+    filter := bson.M{
+        "$or": []bson.M{
+            {"monthly_token_limit": bson.M{"$exists": false}},
+            {"total_tokens_used": bson.M{"$exists": false}},
+        },
+    }
+    
+    update := bson.M{
+        "$set": bson.M{
+            "monthly_token_limit": int64(100000), // 100k tokens per month
+            "total_tokens_used":   int64(0),
+            "status":              "active",
+            "start_date":          time.Now(),
+            "expiry_date":         time.Now().AddDate(0, 1, 0), // 1 month
+            "updated_at":          time.Now(),
+        },
+    }
+    
+    result, err := collection.UpdateMany(context.Background(), filter, update)
+    if err != nil {
+        return err
+    }
+    
+    log.Printf("✅ Initialized token limits for %d projects", result.ModifiedCount)
+    return nil
+}
+
+// ✅ NEW: Get projects approaching token limits
+func GetProjectsApproachingLimit(thresholdPercent float64) ([]primitive.ObjectID, error) {
+    if DB == nil {
+        return nil, fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    // Find projects using more than threshold% of their monthly token limit
+    pipeline := []bson.M{
+        {
+            "$match": bson.M{
+                "monthly_token_limit": bson.M{"$gt": 0},
+                "total_tokens_used": bson.M{"$gt": 0},
+                "status": "active",
+            },
+        },
+        {
+            "$addFields": bson.M{
+                "usage_percentage": bson.M{
+                    "$multiply": []interface{}{
+                        bson.M{"$divide": []interface{}{"$total_tokens_used", "$monthly_token_limit"}},
+                        100,
+                    },
+                },
+            },
+        },
+        {
+            "$match": bson.M{
+                "usage_percentage": bson.M{"$gte": thresholdPercent},
+            },
+        },
+        {
+            "$project": bson.M{"_id": 1},
+        },
+    }
+    
+    cursor, err := collection.Aggregate(ctx, pipeline)
+    if err != nil {
+        return nil, err
+    }
+    defer cursor.Close(ctx)
+    
+    var projects []primitive.ObjectID
+    for cursor.Next(ctx) {
+        var project struct {
+            ID primitive.ObjectID `bson:"_id"`
+        }
+        if err := cursor.Decode(&project); err != nil {
+            continue
+        }
+        projects = append(projects, project.ID)
+    }
+    
+    return projects, nil
+}
+
+// ✅ NEW: Log notification events
+func LogNotification(projectID primitive.ObjectID, notificationType, message string) error {
+    if DB == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    
+    collection := DB.Collection("notifications")
+    
+    notification := bson.M{
+        "project_id": projectID,
+        "type": notificationType,
+        "message": message,
+        "sent_at": time.Now(),
+        "status": "sent",
+    }
+    
+    _, err := collection.InsertOne(ctx, notification)
+    return err
+}
+
+// ✅ NEW: Check if notification was recently sent
+func WasNotificationRecentlySent(projectID primitive.ObjectID, notificationType string, hours int) (bool, error) {
+    if DB == nil {
+        return false, fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    
+    collection := DB.Collection("notifications")
+    
+    filter := bson.M{
+        "project_id": projectID,
+        "type": notificationType,
+        "sent_at": bson.M{
+            "$gte": time.Now().Add(-time.Duration(hours) * time.Hour),
+        },
+    }
+    
+    count, err := collection.CountDocuments(ctx, filter)
+    if err != nil {
+        return false, err
+    }
+    
+    return count > 0, nil
+}
+
+// ✅ NEW: Subscription status constants
+const (
+    StatusActive    = "active"
+    StatusExpired   = "expired"
+    StatusSuspended = "suspended"
+    StatusInactive  = "inactive"
+)
+
+// ✅ NEW: Migration function for existing projects
+func MigrateExistingProjects() error {
+    if DB == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    // Update ALL existing projects with missing fields
+    filter := bson.M{} // Update all projects
+    
+    update := bson.M{
+        "$set": bson.M{
+            // Set Reset Timestamps for existing projects
+            "last_daily_reset":     time.Now(),
+            "last_monthly_reset":   time.Now(),
+            "last_token_reset":     time.Now(),
+            
+            // Set Subscription defaults
+            "start_date":          time.Now(),
+            "expiry_date":         time.Now().AddDate(0, 1, 0),
+            "status":              "active",
+            "total_tokens_used":   int64(0),
+            "monthly_token_limit": int64(100000),
+            "updated_at":          time.Now(),
+        },
+    }
+    
+    result, err := collection.UpdateMany(ctx, filter, update)
+    if err != nil {
+        return fmt.Errorf("failed to migrate projects: %v", err)
+    }
+    
+    log.Printf("✅ Migrated %d existing projects with reset timestamps", result.ModifiedCount)
+    return nil
+}

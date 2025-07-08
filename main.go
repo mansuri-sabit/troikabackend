@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -9,9 +11,11 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"go.mongodb.org/mongo-driver/bson"
 	"jevi-chat/config"
 	"jevi-chat/handlers"
 	"jevi-chat/middleware"
+	"jevi-chat/models"
 )
 
 func main() {
@@ -25,27 +29,39 @@ func main() {
 	config.InitMongoDB()
 	config.InitGemini()
 	handlers.InitRateLimiters()
-
-
-	    // Start periodic subscription maintenance
-    go func() {
-        ticker := time.NewTicker(1 * time.Hour) // Run every hour
-        defer ticker.Stop()
-        
-        for {
-            select {
-            case <-ticker.C:
-                if err := config.RunSubscriptionMaintenance(); err != nil {
-                    log.Printf("❌ Subscription maintenance failed: %v", err)
-                }
-            }
-        }
-    }()
 	
 	// Add graceful shutdown
 	defer config.CloseMongoDB()
 	
 	log.Println("✅ All services initialized successfully")
+
+	// ✅ Start notification monitoring
+	go func() {
+		ticker := time.NewTicker(30 * time.Minute) // Check every 30 minutes
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				checkAndSendNotifications()
+			}
+		}
+	}()
+
+	// ✅ Start periodic subscription maintenance
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour) // Run every hour
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				if err := config.RunSubscriptionMaintenance(); err != nil {
+					log.Printf("❌ Subscription maintenance failed: %v", err)
+				}
+			}
+		}
+	}()
 
 	// Set up Gin with enhanced configuration
 	r := gin.Default()
@@ -121,7 +137,78 @@ func main() {
 	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, r))
 }
 
-
+// ✅ FIXED: Helper function moved outside main() with proper context
+func checkAndSendNotifications() {
+	log.Println("🔔 Checking for notification triggers...")
+	
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	// Get projects with high token usage
+	collection := config.DB.Collection("projects")
+	
+	// Find projects using more than 80% of their monthly token limit
+	pipeline := []bson.M{
+		{
+			"$match": bson.M{
+				"monthly_token_limit": bson.M{"$gt": 0},
+				"total_tokens_used": bson.M{"$gt": 0},
+				"status": "active",
+			},
+		},
+		{
+			"$addFields": bson.M{
+				"usage_percentage": bson.M{
+					"$multiply": []interface{}{
+						bson.M{"$divide": []interface{}{"$total_tokens_used", "$monthly_token_limit"}},
+						100,
+					},
+				},
+			},
+		},
+		{
+			"$match": bson.M{
+				"usage_percentage": bson.M{"$gte": 80},
+			},
+		},
+	}
+	
+	cursor, err := collection.Aggregate(ctx, pipeline)
+	if err != nil {
+		log.Printf("❌ Failed to check high usage projects: %v", err)
+		return
+	}
+	defer cursor.Close(ctx)
+	
+	var projects []models.Project
+	if err := cursor.All(ctx, &projects); err != nil {
+		log.Printf("❌ Failed to parse high usage projects: %v", err)
+		return
+	}
+	
+	for _, project := range projects {
+		usagePercent := float64(project.TotalTokensUsed) / float64(project.MonthlyTokenLimit) * 100
+		
+		if usagePercent >= 100 {
+			// Check if notification was recently sent
+			recentlySent, err := config.WasNotificationRecentlySent(project.ID, "monthly_limit", 24)
+			if err == nil && !recentlySent {
+				message := fmt.Sprintf("Monthly token limit reached for project: %s", project.Name)
+				config.LogNotification(project.ID, "monthly_limit", message)
+				log.Printf("🚨 Monthly limit notification logged for project: %s", project.Name)
+			}
+		} else if usagePercent >= 80 {
+			recentlySent, err := config.WasNotificationRecentlySent(project.ID, "usage_warning", 12)
+			if err == nil && !recentlySent {
+				message := fmt.Sprintf("Token usage warning (%.1f%%) for project: %s", usagePercent, project.Name)
+				config.LogNotification(project.ID, "usage_warning", message)
+				log.Printf("⚠️ Usage warning notification logged for project: %s", project.Name)
+			}
+		}
+	}
+	
+	log.Printf("✅ Notification check completed for %d projects", len(projects))
+}
 
 // ✅ Complete route setup with PUBLIC PDF upload
 func setupRoutes(r *gin.Engine) {
@@ -222,7 +309,7 @@ func setupRoutes(r *gin.Engine) {
 		api.GET("/admin/realtime-stats", handlers.GetRealtimeStats)
 	}
 
-	// ✅ ADMIN ROUTES (WITH AUTHENTICATION) - PDF upload को छोड़कर
+	// ✅ ADMIN ROUTES (WITH AUTHENTICATION)
 	admin := r.Group("/admin")
 	admin.Use(handlers.RateLimitMiddleware("general"))
 	admin.Use(func(c *gin.Context) {
@@ -260,11 +347,16 @@ func setupRoutes(r *gin.Engine) {
 		admin.DELETE("/projects/:id/pdf/:fileId", handlers.DeletePDF)
 		admin.GET("/projects/:id/pdfs", handlers.GetPDFFiles)
 
-// Admin subscription management routes
-admin.GET("/subscription-stats", handlers.GetSubscriptionStats)
-admin.POST("/projects/:id/renew", handlers.RenewSubscription)
-admin.PATCH("/projects/:id/status", handlers.UpdateClientStatus)
-admin.GET("/projects/:id/usage", handlers.GetProjectUsage)
+		// Admin subscription management routes
+		admin.GET("/subscription-stats", handlers.GetSubscriptionStats)
+		admin.POST("/projects/:id/renew", handlers.RenewSubscription)
+		admin.PATCH("/projects/:id/status", handlers.UpdateClientStatus)
+		admin.GET("/projects/:id/usage", handlers.GetProjectUsage)
+
+		// Notification management routes
+		admin.GET("/notifications", handlers.GetNotificationHistory)
+		admin.GET("/projects/:id/notifications", handlers.GetProjectNotifications)
+		admin.POST("/projects/:id/test-notification", handlers.TestNotification)
 	}
 
 	// ✅ USER ROUTES
@@ -282,20 +374,18 @@ admin.GET("/projects/:id/usage", handlers.GetProjectUsage)
 		user.GET("/project/:id", handlers.ProjectDashboard)
 		user.GET("/chat/:id", handlers.IframeChatInterface)
 		user.POST("/chat/:id/message", handlers.RateLimitMiddleware("chat"), handlers.SendMessage)
-		
 		user.GET("/chat/:id/history", handlers.GetChatHistory)
 	}
 
-// ✅ CHAT API with Subscription Validation
-chat := r.Group("/chat")
-chat.Use(handlers.RateLimitMiddleware("chat"))
-chat.Use(middleware.ValidateSubscription()) // Add subscription validation
-{
-    chat.POST("/:projectId/message", handlers.IframeSendMessage)
-    chat.GET("/:projectId/history", handlers.RateLimitMiddleware("general"), handlers.GetChatHistory)
-    chat.POST("/:projectId/rate/:messageId", handlers.RateLimitMiddleware("general"), handlers.RateMessage)
-}
-
+	// ✅ CHAT API with Subscription Validation
+	chat := r.Group("/chat")
+	chat.Use(handlers.RateLimitMiddleware("chat"))
+	chat.Use(middleware.ValidateSubscription()) // Add subscription validation
+	{
+		chat.POST("/:projectId/message", handlers.IframeSendMessage)
+		chat.GET("/:projectId/history", handlers.RateLimitMiddleware("general"), handlers.GetChatHistory)
+		chat.POST("/:projectId/rate/:messageId", handlers.RateLimitMiddleware("general"), handlers.RateMessage)
+	}
 
 	// ✅ ERROR HANDLING
 	r.NoRoute(func(c *gin.Context) {

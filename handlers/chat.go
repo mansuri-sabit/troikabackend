@@ -1128,23 +1128,65 @@ func UpdateProjectLimits(c *gin.Context) {
 
 
 
-// Update token usage in database
-// Update token usage in database
+
+// Enhanced updateTokenUsage function with notification triggers
 func updateTokenUsage(projectID primitive.ObjectID, tokensUsed int) error {
     collection := config.DB.Collection("projects")
     
-    // ✅ FIXED: Use proper context
     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
     defer cancel()
     
+    // Get current project state
+    var project models.Project
+    err := collection.FindOne(ctx, bson.M{"_id": projectID}).Decode(&project)
+    if err != nil {
+        return fmt.Errorf("failed to get project: %v", err)
+    }
+    
+    // Calculate new usage
+    newTotalUsage := project.TotalTokensUsed + int64(tokensUsed)
+    usagePercent := float64(newTotalUsage) / float64(project.MonthlyTokenLimit) * 100
+    
+    // Update token usage in database
     update := bson.M{
         "$inc": bson.M{"total_tokens_used": tokensUsed},
         "$set": bson.M{"updated_at": time.Now()},
     }
     
-    _, err := collection.UpdateOne(ctx, bson.M{"_id": projectID}, update)
-    return err
+    _, err = collection.UpdateOne(ctx, bson.M{"_id": projectID}, update)
+    if err != nil {
+        return err
+    }
+    
+    // ✅ FIXED: Proper notification triggering logic
+    go func() {
+        // Update project with new usage for notifications
+        project.TotalTokensUsed = newTotalUsage
+        
+        // Check if monthly limit reached (100%)
+        if usagePercent >= 100 {
+            // Check if notification was recently sent (within 24 hours)
+            recentlySent, err := config.WasNotificationRecentlySent(projectID, "monthly_limit", 24)
+            if err == nil && !recentlySent {
+                message := fmt.Sprintf("Monthly token limit reached for project: %s", project.Name)
+                config.LogNotification(projectID, "monthly_limit", message)
+                log.Printf("🚨 Monthly limit notification logged for project: %s", project.Name)
+            }
+        } else if usagePercent >= 80 {
+            // Send warning if approaching limit (80%)
+            recentlySent, err := config.WasNotificationRecentlySent(projectID, "usage_warning", 12)
+            if err == nil && !recentlySent {
+                message := fmt.Sprintf("Token usage warning (%.1f%%) for project: %s", usagePercent, project.Name)
+                config.LogNotification(projectID, "usage_warning", message)
+                log.Printf("⚠️ Usage warning notification logged for project: %s", project.Name)
+            }
+        }
+    }()
+    
+    return nil
 }
+
+
 
 // Enhanced Gemini response with token counting
 func generateResponseWithTokens(prompt, pdfContext string) (string, int, int, error) {

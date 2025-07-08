@@ -3,7 +3,7 @@ package handlers
 import (
 
     "math/rand"
-   
+   "go.mongodb.org/mongo-driver/mongo/options" 
         "context"
     "fmt"
     "io/ioutil"
@@ -1046,3 +1046,104 @@ func UpdateClientStatus(c *gin.Context) {
     })
 }
 
+// GetNotificationHistory - Get notification history for admin dashboard
+func GetNotificationHistory(c *gin.Context) {
+    collection := config.DB.Collection("notifications")
+    
+    // Get recent notifications (last 30 days)
+    filter := bson.M{
+        "sent_at": bson.M{
+            "$gte": time.Now().AddDate(0, 0, -30),
+        },
+    }
+    
+    cursor, err := collection.Find(context.Background(), filter, 
+        options.Find().SetSort(bson.M{"sent_at": -1}).SetLimit(100))
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get notifications"})
+        return
+    }
+    defer cursor.Close(context.Background())
+    
+    var notifications []bson.M
+    if err := cursor.All(context.Background(), &notifications); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse notifications"})
+        return
+    }
+    
+    c.JSON(http.StatusOK, gin.H{
+        "notifications": notifications,
+        "count": len(notifications),
+    })
+}
+
+// GetProjectNotifications - Get notifications for specific project
+func GetProjectNotifications(c *gin.Context) {
+    projectID := c.Param("id")
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+        return
+    }
+    
+    collection := config.DB.Collection("notifications")
+    
+    filter := bson.M{
+        "project_id": objID,
+        "sent_at": bson.M{
+            "$gte": time.Now().AddDate(0, 0, -7), // Last 7 days
+        },
+    }
+    
+    cursor, err := collection.Find(context.Background(), filter, 
+        options.Find().SetSort(bson.M{"sent_at": -1}))
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get project notifications"})
+        return
+    }
+    defer cursor.Close(context.Background())
+    
+    var notifications []bson.M
+    if err := cursor.All(context.Background(), &notifications); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse notifications"})
+        return
+    }
+    
+    c.JSON(http.StatusOK, gin.H{
+        "project_id": projectID,
+        "notifications": notifications,
+        "count": len(notifications),
+    })
+}
+
+// TestNotification - Test notification system
+func TestNotification(c *gin.Context) {
+    projectID := c.Param("id")
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+        return
+    }
+    
+    // Get project
+    collection := config.DB.Collection("projects")
+    var project models.Project
+    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+        return
+    }
+    
+    // Send test notification
+    message := fmt.Sprintf("Test notification for project: %s", project.Name)
+    err = config.LogNotification(objID, "test", message)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send test notification"})
+        return
+    }
+    
+    c.JSON(http.StatusOK, gin.H{
+        "message": "Test notification sent successfully",
+        "project": project.Name,
+    })
+}
