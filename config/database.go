@@ -6,6 +6,7 @@ import (
     "log"
     "os"
     "strings"
+    "strconv"
     "time"
     "go.mongodb.org/mongo-driver/bson/primitive"
     "go.mongodb.org/mongo-driver/bson"
@@ -337,6 +338,7 @@ func CloseMongoDB() {
 }
 
 // ✅ ENHANCED: Complete subscription management function
+// FixProjectLimits - Complete function to fix missing subscription fields
 func FixProjectLimits() error {
     if DB == nil {
         return fmt.Errorf("database not initialized")
@@ -360,33 +362,72 @@ func FixProjectLimits() error {
             {"monthly_token_limit": bson.M{"$exists": false}},
             {"start_date": bson.M{"$exists": false}},
             {"last_token_reset": bson.M{"$exists": false}},
+            {"status": ""},  // Also catch empty status strings
         },
     }
     
+    // Get configurable defaults from environment or use hardcoded values
+    defaultDailyLimit := getEnvInt("DEFAULT_DAILY_LIMIT", 100)
+    defaultMonthlyLimit := getEnvInt("DEFAULT_MONTHLY_LIMIT", 3000)
+    defaultTokenLimit := getEnvInt64("DEFAULT_MONTHLY_TOKEN_LIMIT", 100000)
+    
     update := bson.M{
         "$set": bson.M{
-            "gemini_daily_limit":   100,
-            "gemini_monthly_limit": 3000,
+            "gemini_daily_limit":   defaultDailyLimit,
+            "gemini_monthly_limit": defaultMonthlyLimit,
             "last_daily_reset":     time.Now(),
             "last_monthly_reset":   time.Now(),
             "last_token_reset":     time.Now(),
             "updated_at":          time.Now(),
-            // ✅ Subscription fields
+            
+            // ✅ Subscription Management Fields
             "status":              "active",
             "start_date":          time.Now(),
             "expiry_date":         time.Now().AddDate(0, 1, 0), // 1 month from now
-            "total_tokens_used":   int64(0),
-            "monthly_token_limit": int64(100000), // 100k tokens default
+            "monthly_token_limit": defaultTokenLimit,
+        },
+        "$setOnInsert": bson.M{
+            "total_tokens_used": int64(0), // Only set if field doesn't exist
         },
     }
     
     result, err := collection.UpdateMany(ctx, filter, update)
     if err != nil {
+        log.Printf("❌ Database error in FixProjectLimits: %v", err)
         return fmt.Errorf("failed to fix project limits: %v", err)
     }
     
-    log.Printf("✅ Fixed limits and subscription fields for %d projects", result.ModifiedCount)
+    if result.ModifiedCount == 0 {
+        log.Printf("ℹ️ No projects needed subscription field updates")
+    } else {
+        log.Printf("✅ Fixed limits and subscription fields for %d projects", result.ModifiedCount)
+        
+        // Log details of what was fixed
+        log.Printf("📊 Applied defaults: Daily=%d, Monthly=%d, Tokens=%d", 
+            defaultDailyLimit, defaultMonthlyLimit, defaultTokenLimit)
+    }
+    
     return nil
+}
+
+// Helper function to get environment variable as int with default
+func getEnvInt(key string, defaultValue int) int {
+    if envValue := os.Getenv(key); envValue != "" {
+        if parsed, err := strconv.Atoi(envValue); err == nil {
+            return parsed
+        }
+    }
+    return defaultValue
+}
+
+// Helper function to get environment variable as int64 with default
+func getEnvInt64(key string, defaultValue int64) int64 {
+    if envValue := os.Getenv(key); envValue != "" {
+        if parsed, err := strconv.ParseInt(envValue, 10, 64); err == nil {
+            return parsed
+        }
+    }
+    return defaultValue
 }
 
 // Initialize default project settings
