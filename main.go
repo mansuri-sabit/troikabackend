@@ -25,6 +25,22 @@ func main() {
 	config.InitMongoDB()
 	config.InitGemini()
 	handlers.InitRateLimiters()
+
+
+	    // Start periodic subscription maintenance
+    go func() {
+        ticker := time.NewTicker(1 * time.Hour) // Run every hour
+        defer ticker.Stop()
+        
+        for {
+            select {
+            case <-ticker.C:
+                if err := config.RunSubscriptionMaintenance(); err != nil {
+                    log.Printf("❌ Subscription maintenance failed: %v", err)
+                }
+            }
+        }
+    }()
 	
 	// Add graceful shutdown
 	defer config.CloseMongoDB()
@@ -104,6 +120,8 @@ func main() {
 	// Start server
 	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, r))
 }
+
+
 
 // ✅ Complete route setup with PUBLIC PDF upload
 func setupRoutes(r *gin.Engine) {
@@ -241,6 +259,12 @@ func setupRoutes(r *gin.Engine) {
 		// PDF management endpoints (with auth)
 		admin.DELETE("/projects/:id/pdf/:fileId", handlers.DeletePDF)
 		admin.GET("/projects/:id/pdfs", handlers.GetPDFFiles)
+
+// Admin subscription management routes
+admin.GET("/subscription-stats", handlers.GetSubscriptionStats)
+admin.POST("/projects/:id/renew", handlers.RenewSubscription)
+admin.PATCH("/projects/:id/status", handlers.UpdateClientStatus)
+admin.GET("/projects/:id/usage", handlers.GetProjectUsage)
 	}
 
 	// ✅ USER ROUTES
@@ -258,17 +282,20 @@ func setupRoutes(r *gin.Engine) {
 		user.GET("/project/:id", handlers.ProjectDashboard)
 		user.GET("/chat/:id", handlers.IframeChatInterface)
 		user.POST("/chat/:id/message", handlers.RateLimitMiddleware("chat"), handlers.SendMessage)
+		
 		user.GET("/chat/:id/history", handlers.GetChatHistory)
 	}
 
-	// ✅ CHAT API
-	chat := r.Group("/chat")
-	chat.Use(handlers.RateLimitMiddleware("chat"))
-	{
-		chat.POST("/:projectId/message", handlers.RateLimitMiddleware("chat"), handlers.IframeSendMessage)
-		chat.GET("/:projectId/history", handlers.RateLimitMiddleware("general"), handlers.GetChatHistory)
-		chat.POST("/:projectId/rate/:messageId", handlers.RateLimitMiddleware("general"), handlers.RateMessage)
-	}
+// ✅ CHAT API with Subscription Validation
+chat := r.Group("/chat")
+chat.Use(handlers.RateLimitMiddleware("chat"))
+chat.Use(middleware.ValidateSubscription()) // Add subscription validation
+{
+    chat.POST("/:projectId/message", handlers.IframeSendMessage)
+    chat.GET("/:projectId/history", handlers.RateLimitMiddleware("general"), handlers.GetChatHistory)
+    chat.POST("/:projectId/rate/:messageId", handlers.RateLimitMiddleware("general"), handlers.RateMessage)
+}
+
 
 	// ✅ ERROR HANDLING
 	r.NoRoute(func(c *gin.Context) {

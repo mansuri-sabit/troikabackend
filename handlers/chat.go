@@ -328,263 +328,333 @@ func SendMessage(c *gin.Context) {
 
 // IframeSendMessage - For embed widget users with enhanced features
 func IframeSendMessage(c *gin.Context) {
-	projectID := c.Param("projectId")
-	startTime := time.Now()
-	clientIP := c.ClientIP()
+    projectID := c.Param("projectId")
+    startTime := time.Now()
+    clientIP := c.ClientIP()
 
-	log.Printf("📨 Received message request - Project: %s, IP: %s", projectID, clientIP)
+    log.Printf("📨 Received message request - Project: %s, IP: %s", projectID, clientIP)
 
-	objID, err := primitive.ObjectIDFromHex(projectID)
-	if err != nil {
-		log.Printf("❌ Invalid project ID: %s", projectID)
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":  "Invalid project ID format",
-			"status": "invalid_project_id",
-		})
-		return
-	}
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        log.Printf("❌ Invalid project ID: %s", projectID)
+        c.JSON(http.StatusBadRequest, gin.H{
+            "error":  "Invalid project ID format",
+            "status": "invalid_project_id",
+        })
+        return
+    }
 
-	var messageData struct {
-		Message   string `json:"message"`
-		SessionID string `json:"session_id"`
-		UserToken string `json:"user_token"`
-	}
+    var messageData struct {
+        Message   string `json:"message"`
+        SessionID string `json:"session_id"`
+        UserToken string `json:"user_token"`
+    }
 
-	if err := c.ShouldBindJSON(&messageData); err != nil {
-		log.Printf("❌ JSON binding error: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":  "Invalid message data format",
-			"status": "invalid_request",
-		})
-		return
-	}
+    if err := c.ShouldBindJSON(&messageData); err != nil {
+        log.Printf("❌ JSON binding error: %v", err)
+        c.JSON(http.StatusBadRequest, gin.H{
+            "error":  "Invalid message data format",
+            "status": "invalid_request",
+        })
+        return
+    }
 
-	log.Printf("📨 Message data: Session=%s, Message length=%d", messageData.SessionID, len(messageData.Message))
+    log.Printf("📨 Message data: Session=%s, Message length=%d", messageData.SessionID, len(messageData.Message))
 
-	messageData.Message = sanitizeInput(messageData.Message)
-	if messageData.Message == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":  "Message cannot be empty after sanitization",
-			"status": "empty_message",
-		})
-		return
-	}
+    messageData.Message = sanitizeInput(messageData.Message)
+    if messageData.Message == "" {
+        c.JSON(http.StatusBadRequest, gin.H{
+            "error":  "Message cannot be empty after sanitization",
+            "status": "empty_message",
+        })
+        return
+    }
 
-	if !checkRateLimit(clientIP) {
-		remaining := 0
-		if chatRateLimiter != nil {
-			remaining = chatRateLimiter.GetRemainingRequests(clientIP)
-		}
+    if !checkRateLimit(clientIP) {
+        remaining := 0
+        if chatRateLimiter != nil {
+            remaining = chatRateLimiter.GetRemainingRequests(clientIP)
+        }
 
-		log.Printf("❌ Rate limit exceeded for IP: %s, Remaining: %d", clientIP, remaining)
+        log.Printf("❌ Rate limit exceeded for IP: %s, Remaining: %d", clientIP, remaining)
 
-		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
-		c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
-		c.Header("Retry-After", "60")
+        c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+        c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
+        c.Header("Retry-After", "60")
 
-		c.JSON(http.StatusTooManyRequests, gin.H{
-			"error":       "Rate limit exceeded",
-			"message":     "Please wait before sending another message",
-			"retry_after": 60,
-			"remaining":   remaining,
-			"status":      "rate_limited",
-		})
-		return
-	}
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error":       "Rate limit exceeded",
+            "message":     "Please wait before sending another message",
+            "retry_after": 60,
+            "remaining":   remaining,
+            "status":      "rate_limited",
+        })
+        return
+    }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
 
-	collection := getProjectsCollection()
-	var project models.Project
-	err = collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&project)
-	if err != nil {
-		log.Printf("❌ Project not found: %s, Error: %v", projectID, err)
-		c.JSON(http.StatusNotFound, gin.H{
-			"error":  "Project not found",
-			"status": "project_not_found",
-		})
-		return
-	}
+    collection := getProjectsCollection()
+    var project models.Project
+    err = collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&project)
+    if err != nil {
+        log.Printf("❌ Project not found: %s, Error: %v", projectID, err)
+        c.JSON(http.StatusNotFound, gin.H{
+            "error":  "Project not found",
+            "status": "project_not_found",
+        })
+        return
+    }
 
-	log.Printf("✅ Project found: %s (Active: %v, Gemini: %v)", project.Name, project.IsActive, project.GeminiEnabled)
+    log.Printf("✅ Project found: %s (Active: %v, Gemini: %v)", project.Name, project.IsActive, project.GeminiEnabled)
 
-	if !project.IsActive {
-		log.Printf("❌ Project inactive: %s", projectID)
-		c.JSON(http.StatusForbidden, gin.H{
-			"error":  "This chat is currently unavailable",
-			"status": "project_inactive",
-		})
-		return
-	}
+    // ✅ NEW: Subscription Management Validation
+    now := time.Now()
+    
+    // 1. Check if subscription is expired
+    if !project.ExpiryDate.IsZero() && now.After(project.ExpiryDate) {
+        log.Printf("❌ Subscription expired for project: %s", projectID)
+        c.JSON(http.StatusForbidden, gin.H{
+            "error":      "Your subscription has expired. Please renew to continue.",
+            "status":     "subscription_expired",
+            "blocked":    true,
+            "expiry_date": project.ExpiryDate,
+        })
+        return
+    }
+    
+    // 2. Check if status is active
+    if project.Status != "" && project.Status != "active" {
+        var message string
+        switch project.Status {
+        case "expired":
+            message = "Your subscription has expired. Please renew to continue."
+        case "suspended":
+            message = "Your account has been suspended. Please contact support."
+        default:
+            message = "Your account is not active. Please contact support."
+        }
+        
+        log.Printf("❌ Project status not active: %s (Status: %s)", projectID, project.Status)
+        c.JSON(http.StatusForbidden, gin.H{
+            "error":   message,
+            "status":  "account_inactive",
+            "blocked": true,
+            "account_status": project.Status,
+        })
+        return
+    }
+    
+    // 3. Check monthly token limit (subscription-based)
+    if project.MonthlyTokenLimit > 0 && project.TotalTokensUsed >= project.MonthlyTokenLimit {
+        log.Printf("❌ Monthly token limit exceeded for project: %s (%d/%d)", projectID, project.TotalTokensUsed, project.MonthlyTokenLimit)
+        c.JSON(http.StatusForbidden, gin.H{
+            "error":        "Monthly usage limit reached. Please upgrade your plan.",
+            "status":       "monthly_token_limit_exceeded",
+            "blocked":      true,
+            "tokens_used":  project.TotalTokensUsed,
+            "token_limit":  project.MonthlyTokenLimit,
+        })
+        return
+    }
 
-	if !project.GeminiEnabled {
-		log.Printf("❌ Gemini disabled for project: %s", projectID)
-		c.JSON(http.StatusForbidden, gin.H{
-			"error":  "AI responses are currently disabled for this project",
-			"status": "gemini_disabled",
-		})
-		return
-	}
+    if !project.IsActive {
+        log.Printf("❌ Project inactive: %s", projectID)
+        c.JSON(http.StatusForbidden, gin.H{
+            "error":  "This chat is currently unavailable",
+            "status": "project_inactive",
+        })
+        return
+    }
 
-	// Fixed: Handle zero daily limits properly
-	if project.GeminiDailyLimit == 0 {
-		log.Printf("⚠️ Project %s has daily limit set to 0, setting default limit", projectID)
-		project.GeminiDailyLimit = 100
+    if !project.GeminiEnabled {
+        log.Printf("❌ Gemini disabled for project: %s", projectID)
+        c.JSON(http.StatusForbidden, gin.H{
+            "error":  "AI responses are currently disabled for this project",
+            "status": "gemini_disabled",
+        })
+        return
+    }
 
-		go func() {
-			updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer updateCancel()
-			collection.UpdateOne(updateCtx, bson.M{"_id": objID}, bson.M{
-				"$set": bson.M{"gemini_daily_limit": 100},
-			})
-		}()
-	}
+    // Fixed: Handle zero daily limits properly
+    if project.GeminiDailyLimit == 0 {
+        log.Printf("⚠️ Project %s has daily limit set to 0, setting default limit", projectID)
+        project.GeminiDailyLimit = 100
 
-	if project.GeminiUsageToday >= project.GeminiDailyLimit {
-		log.Printf("❌ Daily limit exceeded for project: %s (%d/%d)", projectID, project.GeminiUsageToday, project.GeminiDailyLimit)
-		c.JSON(http.StatusTooManyRequests, gin.H{
-			"error":  "Daily AI usage limit reached for this project",
-			"status": "daily_limit_exceeded",
-			"usage_info": gin.H{
-				"daily_usage": project.GeminiUsageToday,
-				"daily_limit": project.GeminiDailyLimit,
-				"resets_at":   getNextDailyReset(),
-			},
-		})
-		return
-	}
+        go func() {
+            updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+            defer updateCancel()
+            collection.UpdateOne(updateCtx, bson.M{"_id": objID}, bson.M{
+                "$set": bson.M{"gemini_daily_limit": 100},
+            })
+        }()
+    }
 
-	if project.GeminiMonthlyLimit == 0 {
-		log.Printf("⚠️ Project %s has monthly limit set to 0, setting default limit", projectID)
-		project.GeminiMonthlyLimit = 3000
+    if project.GeminiUsageToday >= project.GeminiDailyLimit {
+        log.Printf("❌ Daily limit exceeded for project: %s (%d/%d)", projectID, project.GeminiUsageToday, project.GeminiDailyLimit)
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error":  "Daily AI usage limit reached for this project",
+            "status": "daily_limit_exceeded",
+            "usage_info": gin.H{
+                "daily_usage": project.GeminiUsageToday,
+                "daily_limit": project.GeminiDailyLimit,
+                "resets_at":   getNextDailyReset(),
+            },
+        })
+        return
+    }
 
-		go func() {
-			updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer updateCancel()
-			collection.UpdateOne(updateCtx, bson.M{"_id": objID}, bson.M{
-				"$set": bson.M{"gemini_monthly_limit": 3000},
-			})
-		}()
-	}
+    if project.GeminiMonthlyLimit == 0 {
+        log.Printf("⚠️ Project %s has monthly limit set to 0, setting default limit", projectID)
+        project.GeminiMonthlyLimit = 3000
 
-	if project.GeminiUsageMonth >= project.GeminiMonthlyLimit {
-		log.Printf("❌ Monthly limit exceeded for project: %s (%d/%d)", projectID, project.GeminiUsageMonth, project.GeminiMonthlyLimit)
-		c.JSON(http.StatusTooManyRequests, gin.H{
-			"error":  "Monthly AI usage limit reached for this project",
-			"status": "monthly_limit_exceeded",
-			"usage_info": gin.H{
-				"monthly_usage": project.GeminiUsageMonth,
-				"monthly_limit": project.GeminiMonthlyLimit,
-				"resets_at":     getNextMonthlyReset(),
-			},
-		})
-		return
-	}
+        go func() {
+            updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+            defer updateCancel()
+            collection.UpdateOne(updateCtx, bson.M{"_id": objID}, bson.M{
+                "$set": bson.M{"gemini_monthly_limit": 3000},
+            })
+        }()
+    }
 
-	var user models.ChatUser
-	if messageData.UserToken != "" {
-		userID, err := validateUserToken(messageData.UserToken)
-		if err == nil {
-			userCollection := getChatUsersCollection()
-			userObjID, _ := primitive.ObjectIDFromHex(userID)
-			userCollection.FindOne(ctx, bson.M{"_id": userObjID}).Decode(&user)
-			log.Printf("👤 User identified: %s (%s)", user.Name, user.Email)
-		} else {
-			log.Printf("⚠️ Invalid user token: %v", err)
-		}
-	}
+    if project.GeminiUsageMonth >= project.GeminiMonthlyLimit {
+        log.Printf("❌ Monthly limit exceeded for project: %s (%d/%d)", projectID, project.GeminiUsageMonth, project.GeminiMonthlyLimit)
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error":  "Monthly AI usage limit reached for this project",
+            "status": "monthly_limit_exceeded",
+            "usage_info": gin.H{
+                "monthly_usage": project.GeminiUsageMonth,
+                "monthly_limit": project.GeminiMonthlyLimit,
+                "resets_at":     getNextMonthlyReset(),
+            },
+        })
+        return
+    }
 
-	var response string
-	var inputTokens, outputTokens int
-	var success bool = true
-	var errorMsg string
+    var user models.ChatUser
+    if messageData.UserToken != "" {
+        userID, err := validateUserToken(messageData.UserToken)
+        if err == nil {
+            userCollection := getChatUsersCollection()
+            userObjID, _ := primitive.ObjectIDFromHex(userID)
+            userCollection.FindOne(ctx, bson.M{"_id": userObjID}).Decode(&user)
+            log.Printf("👤 User identified: %s (%s)", user.Name, user.Email)
+        } else {
+            log.Printf("⚠️ Invalid user token: %v", err)
+        }
+    }
 
-	if project.GeminiAPIKey == "" {
-		log.Printf("❌ No Gemini API key configured for project: %s", projectID)
-		success = false
-		errorMsg = "No API key configured"
-		response = "AI configuration is incomplete. Please contact support."
-	} else {
-		if isFirstMessage(objID, messageData.SessionID) {
-			log.Printf("👋 First message for session: %s", messageData.SessionID)
-			time.Sleep(3 * time.Second)
+    var response string
+    var inputTokens, outputTokens int
+    var success bool = true
+    var errorMsg string
 
-			response = project.WelcomeMessage
-			if response == "" {
-				response = "Hello! How can I help you today?"
-			}
-		} else {
-			log.Printf("🤖 Generating AI response for message: %s", messageData.Message[:min(50, len(messageData.Message))])
-			time.Sleep(4 * time.Second)
+    if project.GeminiAPIKey == "" {
+        log.Printf("❌ No Gemini API key configured for project: %s", projectID)
+        success = false
+        errorMsg = "No API key configured"
+        response = "AI configuration is incomplete. Please contact support."
+    } else {
+        if isFirstMessage(objID, messageData.SessionID) {
+            log.Printf("👋 First message for session: %s", messageData.SessionID)
+            time.Sleep(3 * time.Second)
 
-			response, inputTokens, outputTokens, err = generateGeminiResponseWithTracking(
-				project, messageData.Message, clientIP, user)
-			if err != nil {
-				log.Printf("❌ AI response generation failed: %v", err)
-				success = false
-				errorMsg = err.Error()
+            response = project.WelcomeMessage
+            if response == "" {
+                response = "Hello! How can I help you today?"
+            }
+        } else {
+            log.Printf("🤖 Generating AI response for message: %s", messageData.Message[:min(50, len(messageData.Message))])
+            time.Sleep(4 * time.Second)
 
-				if user.Name != "" {
-					response = fmt.Sprintf("Hello %s! I'm having trouble answering just now. Please try again later.", user.Name)
-				} else {
-					response = "I'm having trouble answering just now. Please try again later."
-				}
-			} else {
-				log.Printf("✅ AI response generated successfully (Tokens: %d input, %d output)", inputTokens, outputTokens)
-				go updateGeminiUsage(objID, inputTokens, outputTokens)
-			}
-		}
-	}
+            // ✅ ENHANCED: Generate response with token tracking
+            response, inputTokens, outputTokens, err = generateResponseWithTokens(messageData.Message, project.PDFContent)
+            if err != nil {
+                log.Printf("❌ AI response generation failed: %v", err)
+                success = false
+                errorMsg = err.Error()
 
-	responseTime := time.Since(startTime).Milliseconds()
-	log.Printf("⏱️ Response time: %dms", responseTime)
+                if user.Name != "" {
+                    response = fmt.Sprintf("Hello %s! I'm having trouble answering just now. Please try again later.", user.Name)
+                } else {
+                    response = "I'm having trouble answering just now. Please try again later."
+                }
+            } else {
+                log.Printf("✅ AI response generated successfully (Tokens: %d input, %d output)", inputTokens, outputTokens)
+                
+                // ✅ NEW: Update token usage for subscription tracking
+                totalTokens := inputTokens + outputTokens
+                err = updateTokenUsage(objID, totalTokens)
+                if err != nil {
+                    log.Printf("❌ Failed to update token usage: %v", err)
+                }
+                
+                go updateGeminiUsage(objID, inputTokens, outputTokens)
+            }
+        }
+    }
 
-	go saveMessage(objID, messageData.Message, response, messageData.SessionID, clientIP, user)
+    responseTime := time.Since(startTime).Milliseconds()
+    log.Printf("⏱️ Response time: %dms", responseTime)
 
-	if chatRateLimiter != nil {
-		remaining := chatRateLimiter.GetRemainingRequests(clientIP)
-		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
-		c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
-	}
+    go saveMessage(objID, messageData.Message, response, messageData.SessionID, clientIP, user)
 
-	dailyUsageAfter := int64(project.GeminiUsageToday)
-	monthlyUsageAfter := int64(project.GeminiUsageMonth)
+    if chatRateLimiter != nil {
+        remaining := chatRateLimiter.GetRemainingRequests(clientIP)
+        c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+        c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
+    }
 
-	if success && !isFirstMessage(objID, messageData.SessionID) {
-		dailyUsageAfter++
-		monthlyUsageAfter++
-	}
+    dailyUsageAfter := int64(project.GeminiUsageToday)
+    monthlyUsageAfter := int64(project.GeminiUsageMonth)
 
-	responseData := gin.H{
-		"response":   response,
-		"project_id": projectID,
-		"status":     "success",
-		"timestamp":  time.Now().Format(time.RFC3339),
-		"session_id": messageData.SessionID,
-		"usage_info": gin.H{
-			"daily_usage":     dailyUsageAfter,
-			"daily_limit":     int64(project.GeminiDailyLimit),
-			"daily_remaining": max64(0, int64(project.GeminiDailyLimit)-dailyUsageAfter),
-			"monthly_usage":   monthlyUsageAfter,
-			"monthly_limit":   int64(project.GeminiMonthlyLimit),
-			"response_time":   responseTime,
-			"tokens_used":     inputTokens + outputTokens,
-		},
-	}
+    if success && !isFirstMessage(objID, messageData.SessionID) {
+        dailyUsageAfter++
+        monthlyUsageAfter++
+    }
 
-	if user.Name != "" {
-		responseData["user_name"] = user.Name
-	}
+    // ✅ ENHANCED: Include subscription information in response
+    totalTokens := inputTokens + outputTokens
+    responseData := gin.H{
+        "response":   response,
+        "project_id": projectID,
+        "status":     "success",
+        "timestamp":  time.Now().Format(time.RFC3339),
+        "session_id": messageData.SessionID,
+        "usage_info": gin.H{
+            "daily_usage":     dailyUsageAfter,
+            "daily_limit":     int64(project.GeminiDailyLimit),
+            "daily_remaining": max64(0, int64(project.GeminiDailyLimit)-dailyUsageAfter),
+            "monthly_usage":   monthlyUsageAfter,
+            "monthly_limit":   int64(project.GeminiMonthlyLimit),
+            "response_time":   responseTime,
+            "tokens_used":     totalTokens,
+        },
+        // ✅ NEW: Subscription information
+        "subscription_info": gin.H{
+            "status":           project.Status,
+            "expiry_date":      project.ExpiryDate,
+            "days_remaining":   int(time.Until(project.ExpiryDate).Hours() / 24),
+            "total_tokens_used": project.TotalTokensUsed + int64(totalTokens),
+            "monthly_token_limit": project.MonthlyTokenLimit,
+            "remaining_tokens":    max64(0, project.MonthlyTokenLimit - project.TotalTokensUsed - int64(totalTokens)),
+        },
+    }
 
-	if !success {
-		responseData["status"] = "error"
-		responseData["error_details"] = errorMsg
-	}
+    if user.Name != "" {
+        responseData["user_name"] = user.Name
+    }
 
-	log.Printf("✅ Response sent successfully for project: %s", projectID)
-	c.JSON(http.StatusOK, responseData)
+    if !success {
+        responseData["status"] = "error"
+        responseData["error_details"] = errorMsg
+    }
+
+    log.Printf("✅ Response sent successfully for project: %s", projectID)
+    c.JSON(http.StatusOK, responseData)
 }
+
 
 // ===== AI RESPONSE GENERATION =====
 
@@ -1053,4 +1123,65 @@ func UpdateProjectLimits(c *gin.Context) {
 		"daily_limit":   limitData.DailyLimit,
 		"monthly_limit": limitData.MonthlyLimit,
 	})
+}
+
+
+
+
+// Update token usage in database
+// Update token usage in database
+func updateTokenUsage(projectID primitive.ObjectID, tokensUsed int) error {
+    collection := config.DB.Collection("projects")
+    
+    // ✅ FIXED: Use proper context
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    
+    update := bson.M{
+        "$inc": bson.M{"total_tokens_used": tokensUsed},
+        "$set": bson.M{"updated_at": time.Now()},
+    }
+    
+    _, err := collection.UpdateOne(ctx, bson.M{"_id": projectID}, update)
+    return err
+}
+
+// Enhanced Gemini response with token counting
+func generateResponseWithTokens(prompt, pdfContext string) (string, int, int, error) {
+    // ✅ FIXED: Use proper context
+    ctx := context.Background()
+    model := config.GeminiClient.GenerativeModel("gemini-1.5-flash")
+    
+    fullPrompt := fmt.Sprintf(`
+    You're a friendly assistant. Answer based on the context provided.
+    
+    Context: %s
+    Question: %s
+    `, pdfContext, prompt)
+    
+    resp, err := model.GenerateContent(ctx, genai.Text(fullPrompt))
+    if err != nil {
+        return "", 0, 0, err
+    }
+    
+    if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+        response := string(resp.Candidates[0].Content.Parts[0].(genai.Text))
+        
+        // Extract token usage from response metadata
+        inputTokens := resp.UsageMetadata.PromptTokenCount
+        outputTokens := resp.UsageMetadata.CandidatesTokenCount
+        
+        return response, int(inputTokens), int(outputTokens), nil
+    }
+    
+    return "No response generated", 0, 0, nil
+}
+
+
+// Helper function for max calculation
+func maxInt64(a, b int64) int64 {
+    if a > b {
+        return a
+    }
+    return b
 }

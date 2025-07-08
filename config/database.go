@@ -64,6 +64,14 @@ func InitMongoDB() {
     if err := verifyCollections(ctx); err != nil {
         log.Printf("⚠️ Warning during collection verification: %v", err)
     }
+
+    // ✅ Initialize subscription defaults for existing projects
+    go func() {
+        time.Sleep(2 * time.Second) // Wait for connection to stabilize
+        if err := InitializeSubscriptionDefaults(); err != nil {
+            log.Printf("⚠️ Warning during subscription initialization: %v", err)
+        }
+    }()
 }
 
 func testConnection(ctx context.Context, client *mongo.Client) error {
@@ -127,6 +135,7 @@ func verifyCollections(ctx context.Context) error {
     return setupIndexes(ctx)
 }
 
+// ✅ COMPLETE: Subscription management indexes
 func setupIndexes(ctx context.Context) error {
     // Projects collection indexes
     projectsCol := DB.Collection("projects")
@@ -141,6 +150,27 @@ func setupIndexes(ctx context.Context) error {
         },
         {
             Keys: bson.D{{"created_at", -1}},
+            Options: options.Index().SetBackground(true),
+        },
+        // ✅ Subscription-specific indexes
+        {
+            Keys: bson.D{{"status", 1}},
+            Options: options.Index().SetBackground(true),
+        },
+        {
+            Keys: bson.D{{"expiry_date", 1}},
+            Options: options.Index().SetBackground(true),
+        },
+        {
+            Keys: bson.D{{"total_tokens_used", 1}},
+            Options: options.Index().SetBackground(true),
+        },
+        {
+            Keys: bson.D{{"status", 1}, {"expiry_date", 1}},
+            Options: options.Index().SetBackground(true),
+        },
+        {
+            Keys: bson.D{{"monthly_token_limit", 1}},
             Options: options.Index().SetBackground(true),
         },
     })
@@ -193,6 +223,10 @@ func setupIndexes(ctx context.Context) error {
         },
         {
             Keys: bson.D{{"timestamp", -1}},
+            Options: options.Index().SetBackground(true),
+        },
+        {
+            Keys: bson.D{{"project_id", 1}, {"success", 1}},
             Options: options.Index().SetBackground(true),
         },
     })
@@ -302,7 +336,7 @@ func CloseMongoDB() {
     }
 }
 
-// Fix project limits for zero values
+// ✅ ENHANCED: Fix project limits with subscription fields
 func FixProjectLimits() error {
     if DB == nil {
         return fmt.Errorf("database not initialized")
@@ -313,13 +347,17 @@ func FixProjectLimits() error {
     
     collection := GetProjectsCollection()
     
-    // Find projects with zero limits
+    // Find projects with zero limits or missing subscription fields
     filter := bson.M{
         "$or": []bson.M{
             {"gemini_daily_limit": 0},
             {"gemini_monthly_limit": 0},
             {"last_daily_reset": bson.M{"$lt": time.Now().AddDate(0, 0, -1)}},
             {"last_monthly_reset": bson.M{"$lt": time.Now().AddDate(0, -1, 0)}},
+            {"status": bson.M{"$exists": false}},
+            {"expiry_date": bson.M{"$exists": false}},
+            {"total_tokens_used": bson.M{"$exists": false}},
+            {"monthly_token_limit": bson.M{"$exists": false}},
         },
     }
     
@@ -330,6 +368,12 @@ func FixProjectLimits() error {
             "last_daily_reset":     time.Now(),
             "last_monthly_reset":   time.Now(),
             "updated_at":          time.Now(),
+            // ✅ Subscription fields
+            "status":              "active",
+            "start_date":          time.Now(),
+            "expiry_date":         time.Now().AddDate(0, 1, 0), // 1 month from now
+            "total_tokens_used":   int64(0),
+            "monthly_token_limit": int64(100000), // 100k tokens default
         },
     }
     
@@ -366,6 +410,12 @@ func InitializeProjectDefaults(projectID string) error {
             "welcome_message":     "Hello! How can I help you today?",
             "created_at":          time.Now(),
             "updated_at":          time.Now(),
+            // ✅ Subscription defaults
+            "status":              "active",
+            "start_date":          time.Now(),
+            "expiry_date":         time.Now().AddDate(0, 1, 0),
+            "total_tokens_used":   int64(0),
+            "monthly_token_limit": int64(100000),
         },
     }
     
@@ -381,4 +431,325 @@ func InitializeProjectDefaults(projectID string) error {
     
     log.Printf("✅ Initialized defaults for project: %s", projectID)
     return nil
+}
+
+// ✅ SUBSCRIPTION MANAGEMENT FUNCTIONS
+
+// Initialize subscription defaults for existing projects
+func InitializeSubscriptionDefaults() error {
+    if DB == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    // Find projects missing subscription fields
+    filter := bson.M{
+        "$or": []bson.M{
+            {"status": bson.M{"$exists": false}},
+            {"expiry_date": bson.M{"$exists": false}},
+            {"total_tokens_used": bson.M{"$exists": false}},
+            {"monthly_token_limit": bson.M{"$exists": false}},
+            {"start_date": bson.M{"$exists": false}},
+        },
+    }
+    
+    update := bson.M{
+        "$set": bson.M{
+            "status":              "active",
+            "start_date":          time.Now(),
+            "expiry_date":         time.Now().AddDate(0, 1, 0), // 1 month from now
+            "total_tokens_used":   int64(0),
+            "monthly_token_limit": int64(100000), // 100k tokens default
+            "updated_at":          time.Now(),
+        },
+    }
+    
+    result, err := collection.UpdateMany(ctx, filter, update)
+    if err != nil {
+        return fmt.Errorf("failed to initialize subscription defaults: %v", err)
+    }
+    
+    log.Printf("✅ Initialized subscription defaults for %d projects", result.ModifiedCount)
+    return nil
+}
+
+// Get expired projects
+func GetExpiredProjects() ([]primitive.ObjectID, error) {
+    if DB == nil {
+        return nil, fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    filter := bson.M{
+        "expiry_date": bson.M{"$lt": time.Now()},
+        "status":      bson.M{"$ne": "expired"},
+    }
+    
+    cursor, err := collection.Find(ctx, filter, options.Find().SetProjection(bson.M{"_id": 1}))
+    if err != nil {
+        return nil, err
+    }
+    defer cursor.Close(ctx)
+    
+    var expiredProjects []primitive.ObjectID
+    for cursor.Next(ctx) {
+        var project struct {
+            ID primitive.ObjectID `bson:"_id"`
+        }
+        if err := cursor.Decode(&project); err != nil {
+            continue
+        }
+        expiredProjects = append(expiredProjects, project.ID)
+    }
+    
+    return expiredProjects, nil
+}
+
+// Update expired projects
+func UpdateExpiredProjects() error {
+    if DB == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    filter := bson.M{
+        "expiry_date": bson.M{"$lt": time.Now()},
+        "status":      bson.M{"$ne": "expired"},
+    }
+    
+    update := bson.M{
+        "$set": bson.M{
+            "status":     "expired",
+            "updated_at": time.Now(),
+        },
+    }
+    
+    result, err := collection.UpdateMany(ctx, filter, update)
+    if err != nil {
+        return fmt.Errorf("failed to update expired projects: %v", err)
+    }
+    
+    log.Printf("✅ Marked %d projects as expired", result.ModifiedCount)
+    return nil
+}
+
+// Get subscription statistics
+func GetSubscriptionStats() (map[string]interface{}, error) {
+    if DB == nil {
+        return nil, fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    // Aggregate subscription statistics
+    pipeline := []bson.M{
+        {
+            "$group": bson.M{
+                "_id": "$status",
+                "count": bson.M{"$sum": 1},
+                "total_tokens": bson.M{"$sum": "$total_tokens_used"},
+                "avg_tokens": bson.M{"$avg": "$total_tokens_used"},
+            },
+        },
+    }
+    
+    cursor, err := collection.Aggregate(ctx, pipeline)
+    if err != nil {
+        return nil, err
+    }
+    defer cursor.Close(ctx)
+    
+    var stats []bson.M
+    if err := cursor.All(ctx, &stats); err != nil {
+        return nil, err
+    }
+    
+    return map[string]interface{}{
+        "subscription_stats": stats,
+        "timestamp":         time.Now().Format(time.RFC3339),
+    }, nil
+}
+
+// Reset monthly token usage for all projects
+func ResetMonthlyTokenUsage() error {
+    if DB == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    update := bson.M{
+        "$set": bson.M{
+            "total_tokens_used": int64(0),
+            "updated_at":        time.Now(),
+        },
+    }
+    
+    result, err := collection.UpdateMany(ctx, bson.M{}, update)
+    if err != nil {
+        return fmt.Errorf("failed to reset monthly token usage: %v", err)
+    }
+    
+    log.Printf("✅ Reset monthly token usage for %d projects", result.ModifiedCount)
+    return nil
+}
+
+// Run subscription maintenance
+func RunSubscriptionMaintenance() error {
+    log.Println("🔄 Running subscription maintenance...")
+    
+    // Update expired projects
+    if err := UpdateExpiredProjects(); err != nil {
+        log.Printf("❌ Failed to update expired projects: %v", err)
+        return err
+    }
+    
+    // Fix any projects with missing limits
+    if err := FixProjectLimits(); err != nil {
+        log.Printf("❌ Failed to fix project limits: %v", err)
+        return err
+    }
+    
+    log.Println("✅ Subscription maintenance completed")
+    return nil
+}
+
+// ✅ ADDITIONAL HELPER FUNCTIONS
+
+// Validate subscription schema
+func ValidateSubscriptionSchema() error {
+    if DB == nil {
+        return fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    // Check for projects missing required subscription fields
+    requiredFields := []string{"status", "expiry_date", "total_tokens_used", "monthly_token_limit"}
+    
+    for _, field := range requiredFields {
+        filter := bson.M{field: bson.M{"$exists": false}}
+        count, err := collection.CountDocuments(ctx, filter)
+        if err != nil {
+            return fmt.Errorf("failed to validate field %s: %v", field, err)
+        }
+        
+        if count > 0 {
+            log.Printf("⚠️ Found %d projects missing field: %s", count, field)
+        }
+    }
+    
+    return nil
+}
+
+// Initialize token limits for existing projects
+func InitializeTokenLimits() error {
+    collection := GetProjectsCollection()
+    
+    // Set default token limits for projects without them
+    filter := bson.M{
+        "$or": []bson.M{
+            {"monthly_token_limit": bson.M{"$exists": false}},
+            {"total_tokens_used": bson.M{"$exists": false}},
+        },
+    }
+    
+    update := bson.M{
+        "$set": bson.M{
+            "monthly_token_limit": int64(100000), // 100k tokens per month
+            "total_tokens_used":   int64(0),
+            "status":              "active",
+            "start_date":          time.Now(),
+            "expiry_date":         time.Now().AddDate(0, 1, 0), // 1 month
+            "updated_at":          time.Now(),
+        },
+    }
+    
+    result, err := collection.UpdateMany(context.Background(), filter, update)
+    if err != nil {
+        return err
+    }
+    
+    log.Printf("✅ Initialized token limits for %d projects", result.ModifiedCount)
+    return nil
+}
+
+// Get projects with high token usage (above 80% of limit)
+func GetHighUsageProjects() ([]primitive.ObjectID, error) {
+    if DB == nil {
+        return nil, fmt.Errorf("database not initialized")
+    }
+    
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    
+    collection := GetProjectsCollection()
+    
+    // Find projects using more than 80% of their monthly token limit
+    pipeline := []bson.M{
+        {
+            "$match": bson.M{
+                "monthly_token_limit": bson.M{"$gt": 0},
+                "total_tokens_used": bson.M{"$gt": 0},
+            },
+        },
+        {
+            "$addFields": bson.M{
+                "usage_percentage": bson.M{
+                    "$multiply": []interface{}{
+                        bson.M{"$divide": []interface{}{"$total_tokens_used", "$monthly_token_limit"}},
+                        100,
+                    },
+                },
+            },
+        },
+        {
+            "$match": bson.M{
+                "usage_percentage": bson.M{"$gte": 80},
+            },
+        },
+        {
+            "$project": bson.M{"_id": 1},
+        },
+    }
+    
+    cursor, err := collection.Aggregate(ctx, pipeline)
+    if err != nil {
+        return nil, err
+    }
+    defer cursor.Close(ctx)
+    
+    var highUsageProjects []primitive.ObjectID
+    for cursor.Next(ctx) {
+        var project struct {
+            ID primitive.ObjectID `bson:"_id"`
+        }
+        if err := cursor.Decode(&project); err != nil {
+            continue
+        }
+        highUsageProjects = append(highUsageProjects, project.ID)
+    }
+    
+    return highUsageProjects, nil
 }

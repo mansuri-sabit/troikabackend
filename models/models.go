@@ -58,6 +58,17 @@ type Project struct {
     LastMonthlyReset    time.Time `bson:"last_monthly_reset" json:"last_monthly_reset"`
     EstimatedCostToday  float64   `bson:"estimated_cost_today" json:"estimated_cost_today"`
     EstimatedCostMonth  float64   `bson:"estimated_cost_month" json:"estimated_cost_month"`
+
+    // Subscription Management
+    StartDate       time.Time `bson:"start_date" json:"start_date"`
+    ExpiryDate      time.Time `bson:"expiry_date" json:"expiry_date"`
+    TotalTokensUsed int64     `bson:"total_tokens_used" json:"total_tokens_used"`
+    Status          string    `bson:"status" json:"status"` // active, expired, suspended
+    MonthlyTokenLimit int64   `bson:"monthly_token_limit" json:"monthly_token_limit"`
+    
+    // Enhanced tracking
+    LastTokenReset  time.Time `bson:"last_token_reset" json:"last_token_reset"`
+    SubscriptionPlan string   `bson:"subscription_plan" json:"subscription_plan"`
     
     // Analytics
     TotalQuestions  int                `bson:"total_questions" json:"total_questions"`
@@ -66,6 +77,15 @@ type Project struct {
     // Additional Fields for Enhanced Functionality
     WelcomeMessage  string             `bson:"welcome_message" json:"welcome_message"`
 }
+
+
+// Subscription status constants
+const (
+    StatusActive    = "active"
+    StatusExpired   = "expired"
+    StatusSuspended = "suspended"
+    StatusInactive  = "inactive"
+)
 
 
 // PDFFile represents uploaded PDF files for each project

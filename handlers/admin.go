@@ -868,3 +868,181 @@ func trackGeminiUsage(projectID primitive.ObjectID, question, response, model st
         projectCollection.UpdateOne(context.Background(), bson.M{"_id": projectID}, update)
     }
 }
+
+
+// GetSubscriptionStats - Get subscription statistics for admin dashboard
+func GetSubscriptionStats(c *gin.Context) {
+    stats, err := config.GetSubscriptionStats()
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get subscription stats"})
+        return
+    }
+    
+    c.JSON(http.StatusOK, stats)
+}
+
+// RenewSubscription - Renew client subscription
+func RenewSubscription(c *gin.Context) {
+    projectID := c.Param("id")
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+        return
+    }
+    
+    var renewalData struct {
+        Months int `json:"months"`
+    }
+    
+    if err := c.ShouldBindJSON(&renewalData); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid renewal data"})
+        return
+    }
+    
+    // Calculate new expiry date
+    newExpiryDate := time.Now().AddDate(0, renewalData.Months, 0)
+    
+    collection := config.DB.Collection("projects")
+    update := bson.M{
+        "$set": bson.M{
+            "expiry_date": newExpiryDate,
+            "status": "active",
+            "total_tokens_used": 0, // Reset token usage
+            "updated_at": time.Now(),
+        },
+    }
+    
+    _, err = collection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to renew subscription"})
+        return
+    }
+    
+    c.JSON(http.StatusOK, gin.H{
+        "message": "Subscription renewed successfully",
+        "new_expiry_date": newExpiryDate,
+    })
+}
+
+
+// GetProjectUsage - Get detailed usage statistics for a specific project
+func GetProjectUsage(c *gin.Context) {
+    projectID := c.Param("id")
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+        return
+    }
+
+    // Get project details
+    collection := config.DB.Collection("projects")
+    var project models.Project
+    err = collection.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&project)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
+        return
+    }
+
+    // Get usage statistics from Gemini usage logs
+    usageCollection := config.DB.Collection("gemini_usage_logs")
+    
+    // Current month usage
+    startOfMonth := time.Now().AddDate(0, 0, -time.Now().Day()+1)
+    monthlyUsage, _ := usageCollection.CountDocuments(context.Background(), bson.M{
+        "project_id": objID,
+        "timestamp": bson.M{"$gte": startOfMonth},
+    })
+
+    // Today's usage
+    startOfDay := time.Now().Truncate(24 * time.Hour)
+    dailyUsage, _ := usageCollection.CountDocuments(context.Background(), bson.M{
+        "project_id": objID,
+        "timestamp": bson.M{"$gte": startOfDay},
+    })
+
+    // Calculate usage percentages
+    dailyUsagePercent := 0.0
+    if project.GeminiDailyLimit > 0 {
+        dailyUsagePercent = float64(dailyUsage) / float64(project.GeminiDailyLimit) * 100
+    }
+
+    monthlyUsagePercent := 0.0
+    if project.GeminiMonthlyLimit > 0 {
+        monthlyUsagePercent = float64(monthlyUsage) / float64(project.GeminiMonthlyLimit) * 100
+    }
+
+    // Token usage percentage
+    tokenUsagePercent := 0.0
+    if project.MonthlyTokenLimit > 0 {
+        tokenUsagePercent = float64(project.TotalTokensUsed) / float64(project.MonthlyTokenLimit) * 100
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "project_id": projectID,
+        "project_name": project.Name,
+        "subscription_info": gin.H{
+            "status": project.Status,
+            "start_date": project.StartDate,
+            "expiry_date": project.ExpiryDate,
+            "days_remaining": int(time.Until(project.ExpiryDate).Hours() / 24),
+        },
+        "usage_statistics": gin.H{
+            "daily_usage": dailyUsage,
+            "daily_limit": project.GeminiDailyLimit,
+            "daily_usage_percent": dailyUsagePercent,
+            "monthly_usage": monthlyUsage,
+            "monthly_limit": project.GeminiMonthlyLimit,
+            "monthly_usage_percent": monthlyUsagePercent,
+        },
+        "token_usage": gin.H{
+            "total_tokens_used": project.TotalTokensUsed,
+            "monthly_token_limit": project.MonthlyTokenLimit,
+            "token_usage_percent": tokenUsagePercent,
+            "remaining_tokens": project.MonthlyTokenLimit - project.TotalTokensUsed,
+        },
+        "last_activity": project.LastUsed,
+        "created_at": project.CreatedAt,
+        "updated_at": project.UpdatedAt,
+    })
+}
+
+
+
+// Update client status
+func UpdateClientStatus(c *gin.Context) {
+    projectID := c.Param("id")
+    objID, err := primitive.ObjectIDFromHex(projectID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project ID"})
+        return
+    }
+    
+    var statusData struct {
+        Status string `json:"status"`
+    }
+    
+    if err := c.ShouldBindJSON(&statusData); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid status data"})
+        return
+    }
+    
+    collection := config.DB.Collection("projects")
+    update := bson.M{
+        "$set": bson.M{
+            "status": statusData.Status,
+            "updated_at": time.Now(),
+        },
+    }
+    
+    _, err = collection.UpdateOne(context.Background(), bson.M{"_id": objID}, update)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
+        return
+    }
+    
+    c.JSON(http.StatusOK, gin.H{
+        "message": "Status updated successfully",
+        "new_status": statusData.Status,
+    })
+}
+
