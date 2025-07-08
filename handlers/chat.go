@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 	"regexp"
+	 "bytes"
+	 "encoding/json"
 )
 
 // ===== RATE LIMITING IMPLEMENTATION =====
@@ -1189,34 +1191,98 @@ func updateTokenUsage(projectID primitive.ObjectID, tokensUsed int) error {
 
 
 // Enhanced Gemini response with token counting
-func generateResponseWithTokens(prompt, pdfContext string) (string, int, int, error) {
-    // ✅ FIXED: Use proper context
-    ctx := context.Background()
-    model := config.GeminiClient.GenerativeModel("gemini-1.5-flash")
+// Update your generateResponseWithTokens function
+func generateResponseWithTokens(prompt, context string) (string, int, int, error) {
+    // Use the new API endpoint for Gemini 2.0 Flash
+    apiURL := "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
     
-    fullPrompt := fmt.Sprintf(`
-    You're a friendly assistant. Answer based on the context provided.
+    // Your new API key
+    apiKey := "AIzaSyC28wDyVPh9bvkHxRKHRwojsUarr5GLUME"
     
-    Context: %s
-    Question: %s
-    `, pdfContext, prompt)
+    // Prepare request payload
+    payload := map[string]interface{}{
+        "contents": []map[string]interface{}{
+            {
+                "parts": []map[string]interface{}{
+                    {
+                        "text": fmt.Sprintf("Context: %s\n\nQuestion: %s", context, prompt),
+                    },
+                },
+            },
+        },
+        "generationConfig": map[string]interface{}{
+            "temperature": 0.7,
+            "topP": 0.8,
+            "topK": 40,
+            "maxOutputTokens": 2048,
+        },
+    }
     
-    resp, err := model.GenerateContent(ctx, genai.Text(fullPrompt))
+    // Make API request
+    jsonPayload, _ := json.Marshal(payload)
+    req, _ := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonPayload))
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("x-goog-api-key", apiKey)
+    
+    client := &http.Client{Timeout: 30 * time.Second}
+    resp, err := client.Do(req)
     if err != nil {
-        return "", 0, 0, err
+        return "", 0, 0, fmt.Errorf("API request failed: %v", err)
+    }
+    defer resp.Body.Close()
+    
+    // Parse response
+    var result map[string]interface{}
+    json.NewDecoder(resp.Body).Decode(&result)
+    
+    // Extract response text and token usage
+    candidates := result["candidates"].([]interface{})
+    if len(candidates) == 0 {
+        return "", 0, 0, fmt.Errorf("no response generated")
     }
     
-    if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
-        response := string(resp.Candidates[0].Content.Parts[0].(genai.Text))
-        
-        // Extract token usage from response metadata
-        inputTokens := resp.UsageMetadata.PromptTokenCount
-        outputTokens := resp.UsageMetadata.CandidatesTokenCount
-        
-        return response, int(inputTokens), int(outputTokens), nil
+    candidate := candidates[0].(map[string]interface{})
+    content := candidate["content"].(map[string]interface{})
+    parts := content["parts"].([]interface{})
+    responseText := parts[0].(map[string]interface{})["text"].(string)
+    
+    // Extract token usage if available
+    usageMetadata := result["usageMetadata"].(map[string]interface{})
+    inputTokens := int(usageMetadata["promptTokenCount"].(float64))
+    outputTokens := int(usageMetadata["candidatesTokenCount"].(float64))
+    
+    return responseText, inputTokens, outputTokens, nil
+}
+
+
+
+
+
+
+
+// Add this function to migrate existing projects
+func MigrateToGemini2Flash() error {
+    collection := config.DB.Collection("projects")
+    
+    filter := bson.M{
+        "gemini_model": bson.M{"$in": []string{"gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"}},
     }
     
-    return "No response generated", 0, 0, nil
+    update := bson.M{
+        "$set": bson.M{
+            "gemini_model": "gemini-2.0-flash",
+            "gemini_api_key": "AIzaSyC28wDyVPh9bvkHxRKHRwojsUarr5GLUME",
+            "updated_at": time.Now(),
+        },
+    }
+    
+    result, err := collection.UpdateMany(context.Background(), filter, update)
+    if err != nil {
+        return err
+    }
+    
+    log.Printf("✅ Migrated %d projects to Gemini 2.0 Flash", result.ModifiedCount)
+    return nil
 }
 
 
